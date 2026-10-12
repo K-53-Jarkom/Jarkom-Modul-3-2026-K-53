@@ -965,3 +965,140 @@ Dari tabel terlihat selisih waktu lease ino dan kusakabe 30 menit, sedangkan miw
 > Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), `bash /root/tengen-dhcp.sh` (Soal 2), `bash /root/tengen-net2.sh` (Soal 4), lalu `bash /root/tengen-net3.sh` (Soal 5) agar `net2.conf` dan `net3.conf` kembali berisi kebijakan pool final.
 
 ---
+
+### Soal 6 : Static Lease untuk Kugisaki (tengen)
+
+Kugisaki ditetapkan sebagai personel VIP yang harus mempertahankan alamat yang sama setiap kali terhubung. Pada soal ini dibuat **DHCP static lease** (reservasi) berdasarkan MAC address kugisaki dengan **fixed address `10.90.3.99`**.
+
+#### Gambaran reservasi
+
+| Client | Network | MAC address eth0 | Fixed address |
+|---|---|---|---|
+| kugisaki | 3 (Divisi B) | `02:42:59:c7:e6:00` | 10.90.3.99 |
+
+Alamat `10.90.3.99` berada **di luar seluruh pool dinamis** Network 3:
+
+| Pool | Rentang | Mencakup 10.90.3.99? |
+|---|---|---|
+| short (ino, kusakabe) | 10.90.3.10 - 10.90.3.89 | Tidak |
+| long (miwa) | 10.90.3.100 - 10.90.3.199 | Tidak |
+
+MAC address diambil dengan `cat /sys/class/net/eth0/address` di kugisaki.
+
+> Semua langkah konfigurasi dikerjakan di konsol **tengen**. Verifikasi dikerjakan di kugisaki dan tengen.
+
+---
+
+#### 1. Konfigurasi static lease (tengen)
+
+Buka konsol tengen, lalu jalankan:
+```bash
+cat > /root/tengen-kugisaki.sh << 'EOF'
+#!/bin/bash
+MAC_KUGISAKI="02:42:59:c7:e6:00"
+
+cat > /etc/dhcp/net3-static.conf << EOT
+# Static lease (VIP) Network 3: kugisaki selalu memperoleh 10.90.3.99
+host kugisaki {
+  hardware ethernet $MAC_KUGISAKI;
+  fixed-address 10.90.3.99;
+}
+EOT
+
+# Tambahkan include ke dhcpd.conf hanya jika belum ada
+grep -q 'net3-static.conf' /etc/dhcp/dhcpd.conf || \
+  echo 'include "/etc/dhcp/net3-static.conf";' >> /etc/dhcp/dhcpd.conf
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-kugisaki.sh
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `host kugisaki { ... }` | Reservasi alamat untuk satu client |
+| `hardware ethernet <MAC>` | MAC eth0 kugisaki sebagai kunci reservasi |
+| `fixed-address 10.90.3.99` | Alamat tetap yang selalu diberikan ke MAC tersebut. Berada di celah `10.90.3.90 - 10.90.3.99`, di luar pool short dan long |
+| `net3-static.conf` terpisah | Reservasi disimpan di file sendiri, sehingga `tengen-net3.sh` (Soal 5) boleh dijalankan ulang tanpa menghapus reservasi |
+| `grep -q ... \|\| echo ... >>` | Menambahkan `include` ke `dhcpd.conf` hanya sekali, aman dijalankan berulang |
+| `dhcpd -t ... && service ... restart` | Validasi sintaks dulu, service baru di-restart bila valid |
+
+> Kugisaki tidak dimasukkan ke kelas `short` maupun `long`, jadi alamatnya hanya berasal dari reservasi ini. Karena tidak memakai kelas, lease time-nya mengikuti nilai global (`default-lease-time 600`).
+
+Verifikasi konfigurasi di tengen:
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+cat /etc/dhcp/net3-static.conf
+grep -n include /etc/dhcp/dhcpd.conf
+```
+Hasil yang diharapkan:
+- `dhcpd -t` tidak mengeluarkan error.
+- Status service **dhcpd is running**.
+- `net3-static.conf` berisi blok `host kugisaki` dengan MAC dan `fixed-address 10.90.3.99`.
+- `dhcpd.conf` meng-include `net2.conf`, `net3.conf`, dan `net3-static.conf`.
+
+##### Bukti :
+tengen :
+![](assets/soal6-tengen.png)
+
+Hasil di atas sesuai harapan: validasi konfigurasi lolos tanpa error, `dhcpd is running`, blok `host kugisaki` berisi MAC `02:42:59:c7:e6:00` dan `fixed-address 10.90.3.99`, serta ketiga file ter-include di baris 11, 12, dan 13 pada `dhcpd.conf`.
+
+---
+
+#### 2. Renew lease di kugisaki
+
+Jalankan di kugisaki:
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+ip route
+cat /etc/resolv.conf
+```
+
+Lalu ulangi permintaan sekali lagi untuk membuktikan alamatnya tetap:
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+udhcpc -i eth0
+ip -br addr
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `killall udhcpc` | Menghentikan klien DHCP lama supaya tidak bentrok |
+| `ip addr flush dev eth0` | Membuang IP lama, sehingga permintaan berikutnya benar-benar dari awal |
+| `udhcpc -i eth0` | Meminta lease baru. Permintaan melewati jichi (relay) menuju tengen |
+| `ip -br addr`, `ip route`, `cat /etc/resolv.conf` | Memeriksa IP, gateway, dan DNS yang diterima |
+
+Hasil yang diharapkan:
+- kugisaki memperoleh `10.90.3.99/24` dari server `10.90.4.10`.
+- Gateway `10.90.3.1`, DNS `10.90.1.2` dan `10.90.1.3`.
+- Alamat tetap `10.90.3.99` pada permintaan pertama maupun kedua.
+
+##### Bukti :
+kugisaki : memperoleh `10.90.3.99/24` dari server `10.90.4.10`, lease time 600, default via `10.90.3.1`, nameserver `10.90.1.2` dan `10.90.1.3`. Setelah IP dibuang dan lease diminta ulang, alamat yang diterima tetap `10.90.3.99`.
+![](assets/soal6-kugisaki.png)
+
+Ringkasan hasil:
+
+| Permintaan | IP yang diterima | Server | Sesuai reservasi? |
+|---|---|---|---|
+| Pertama | 10.90.3.99 | 10.90.4.10 | Ya |
+| Kedua (setelah flush) | 10.90.3.99 | 10.90.4.10 | Ya |
+
+Alamat `10.90.3.99` sesuai dengan reservasi `fixed-address` pada `net3-static.conf` dan tidak berada di dalam pool short (10 - 89) maupun long (100 - 199).
+
+> Pada `/var/lib/dhcp/dhcpd.leases`, host dengan `fixed-address` biasanya tidak dicatat sebagai lease dinamis, sehingga pencarian `lease 10.90.3.99` di file tersebut dapat kosong. Bukti reservasi ada pada blok `host kugisaki` di sisi server dan alamat yang diterima di sisi client.
+
+> Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), `bash /root/tengen-dhcp.sh` (Soal 2), `bash /root/tengen-net2.sh` (Soal 4), `bash /root/tengen-net3.sh` (Soal 5), lalu `bash /root/tengen-kugisaki.sh` (Soal 6).
+
+---
