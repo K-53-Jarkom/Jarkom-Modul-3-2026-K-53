@@ -309,8 +309,8 @@ ping -c 3 google.com       # resolver 192.168.122.1
 ```
 ##### Bukti :
 utahime :
-![](assets/soal1-utahime2.png)
-![](assets/soal1-utahime.png)
+![](assets/soal1-utahime2.png)\
+![](assets/soal1-utahime.png)\
 shoko :
 ![](assets/soal1-shoko.png)
 gojo :
@@ -467,8 +467,8 @@ Hasil yang diharapkan:
 - Status service **running**.
 - `ss` menampilkan `dhcpd` mendengarkan di port 67 (`0.0.0.0:67`).
 - `INTERFACESv4="eth0"`.
-##### Bukti :
-tengen :
+##### Bukti :\
+tengen :\
 ![](assets/soal2-tengen.png)
  
 Hasil di atas sesuai harapan: validasi konfigurasi lolos tanpa error, `dhcpd is running`, dhcpd mendengarkan di port 67, dan `INTERFACESv4="eth0"`.
