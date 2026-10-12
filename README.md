@@ -694,7 +694,7 @@ Hasil yang diharapkan:
 
 ##### Bukti :
 tengen :
-![](assets/soal4-tengen2.png)
+![](assets/soal4-tengen.png)
 
 ---
 
