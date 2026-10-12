@@ -123,9 +123,8 @@ Hasil yang diharapkan:
 - `net.ipv4.ip_forward = 1`.
 - Ada aturan `MASQUERADE` pada interface keluar `eth0` dengan source `10.90.0.0/16`.
 - Ketiga ping berhasil tanpa packet loss.
+![](assets/soal1-jichi.png)
 
-![](assets/soal-1-jichi-ip.png)
-![](assets/soal-1-jichi-ping.png)
 
 ---
 
@@ -302,23 +301,38 @@ Jalankan di setiap host. Gateway-nya `10.90.1.1` untuk utahime, shoko, dan gojo,
 ip -br addr
 ping -c 3 <gateway>
 ```
-Contoh di tengen:
-```bash
-ip -br addr
-ping -c 3 10.90.4.1
-```
-
-![](assets/soal-1-gateway-tengen.png)
-
-**b. Akses eksternal (host yang relevan: jichi, tengen, utahime, shoko)**
+**b. Akses eksternal (host yang relevan: jichi, tengen, utahime, shoko - tapi semua host saya juga pakai karena why not?)**
 
 ```bash
 ping -c 3 8.8.8.8          # jalur NAT lewat jichi
 ping -c 3 google.com       # resolver 192.168.122.1
 ```
-
-![](assets/soal-1-eksternal-tengen.png)
-![](assets/soal-1-eksternal-utahime.png)
+##### Bukti :
+utahime :
+![](assets/soal1-utahime2.png)
+![](assets/soal1-utahime.png)
+shoko :
+![](assets/soal1-shoko.png)
+gojo :
+![](assets/soal1-gojo.png)
+tengen :
+![](assets/soal1-tengen.png)
+geto :
+![](assets/soal1-geto.png)
+maki :
+![](assets/soal1-maki.png)
+panda :
+![](assets/soal1-panda.png)
+nanami :
+![](assets/soal1-nanami.png)
+todo :
+![](assets/soal1-todo.png)
+kirara :
+![](assets/soal1-kirara.png)
+yaga :
+![](assets/soal1-yaga.png)
+inumaki :
+![](assets/soal1-inumaki.png)
 
 **c. Routing antar network lewat jichi**
 
@@ -326,13 +340,13 @@ Dari tengen (Network 4) ke utahime (Network 1):
 ```bash
 ping -c 3 10.90.1.2
 ```
+![](assets/soal1-tengen2.png)
 Dari utahime ke tengen:
 ```bash
 ping -c 3 10.90.4.10
 ```
+![](assets/soal1-utahime.png)
 TTL yang turun menjadi 63 menandakan paket melewati satu router (jichi).
-
-![](assets/soal-1-lintas-network.png)
 
 > Jika node di-stop lalu di-start lagi, konfigurasi IP hilang. Cukup jalankan ulang script di `/root` pada node tersebut (`bash /root/jichi.sh`, `bash /root/tengen.sh`, dan seterusnya).
 
