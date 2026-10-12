@@ -781,3 +781,187 @@ Pencocokan lease dengan MAC:
 > Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), `bash /root/tengen-dhcp.sh` (Soal 2), lalu `bash /root/tengen-net2.sh` (Soal 4) agar `net2.conf` kembali berisi dua pool.
 
 ---
+
+### Soal 5 : Short Lease dan Long Lease pada Network 3 (tengen)
+
+Tim lapangan Divisi B (Network 3) punya durasi operasi yang berbeda. Pada soal ini scope sementara Network 3 dari Soal 2 diganti dengan **dua pool** yang dipisahkan memakai **DHCP class berdasarkan MAC address**, dan tiap kelas diberi **lease time** sendiri.
+
+#### Gambaran pembagian
+
+| Kelas | Client | Rentang IP | default-lease-time | max-lease-time |
+|---|---|---|---|---|
+| short | ino, kusakabe | 10.90.3.10 - 10.90.3.89 | 1800 detik (30 menit) | 1800 detik |
+| long | miwa | 10.90.3.100 - 10.90.3.199 | 43200 detik (12 jam) | 43200 detik |
+
+Rentang `10.90.3.90 - 10.90.3.99` tidak dimasukkan ke pool mana pun. Alamat `10.90.3.99` dicadangkan untuk fixed address kugisaki pada Soal 6.
+
+MAC address eth0 tiap client (diambil dengan `cat /sys/class/net/eth0/address`):
+
+| Client | MAC address eth0 | Kelas |
+|---|---|---|
+| ino | `02:42:c9:06:06:00` | short |
+| kusakabe | `02:42:33:cb:b7:00` | short |
+| miwa | `02:42:46:ce:21:00` | long |
+
+> Semua langkah konfigurasi dikerjakan di konsol **tengen**. Verifikasi dikerjakan di ketiga client dan tengen.
+
+---
+
+#### 1. Konfigurasi class dan pool (tengen)
+
+Buka konsol tengen, lalu jalankan:
+```bash
+cat > /root/tengen-net3.sh << 'EOF'
+#!/bin/bash
+MAC_INO="02:42:c9:06:06:00"
+MAC_KUSAKABE="02:42:33:cb:b7:00"
+MAC_MIWA="02:42:46:ce:21:00"
+
+cat > /etc/dhcp/net3.conf << EOT
+# Kelas client Network 3 berdasarkan MAC address
+# Short lease: 30 menit (1800 detik)
+class "short" {
+  match hardware;
+  default-lease-time 1800;
+  max-lease-time 1800;
+}
+subclass "short" 1:$MAC_INO;
+subclass "short" 1:$MAC_KUSAKABE;
+
+# Long lease: 12 jam (43200 detik)
+class "long" {
+  match hardware;
+  default-lease-time 43200;
+  max-lease-time 43200;
+}
+subclass "long" 1:$MAC_MIWA;
+
+subnet 10.90.3.0 netmask 255.255.255.0 {
+  option subnet-mask 255.255.255.0;
+  option routers 10.90.3.1;
+  option broadcast-address 10.90.3.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+
+  # Pool short lease: ino dan kusakabe
+  pool {
+    allow members of "short";
+    range 10.90.3.10 10.90.3.89;
+  }
+
+  # Pool long lease: miwa
+  pool {
+    allow members of "long";
+    range 10.90.3.100 10.90.3.199;
+  }
+  # 10.90.3.90 - 10.90.3.99 tidak masuk pool mana pun (.99 untuk fixed address kugisaki di Soal 6)
+}
+EOT
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-net3.sh
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `class "short" { match hardware; ... }` | Membuat kelas yang mencocokkan client berdasarkan hardware address dari paket DHCP |
+| `default-lease-time` dan `max-lease-time` di dalam class | Lease time khusus untuk anggota kelas tersebut. Nilai global dari Soal 2 (600/7200) tidak diubah dan tetap berlaku untuk client lain |
+| `subclass "short" 1:<MAC>` | Memasukkan satu MAC ke kelas `short`. Awalan `1:` adalah tipe hardware Ethernet |
+| `pool { allow members of "short"; range ...; }` | Pool short hanya boleh dipakai anggota kelas `short`, dengan rentang `10.90.3.10 - 10.90.3.89` |
+| `pool { allow members of "long"; range ...; }` | Pool long hanya boleh dipakai anggota kelas `long`, dengan rentang `10.90.3.100 - 10.90.3.199` |
+| `option routers/broadcast/domain-name-servers/domain-search` | Gateway `10.90.3.1`, broadcast `10.90.3.255`, DNS `10.90.1.2` dan `10.90.1.3`, domain-search `K53.com` |
+| `dhcpd -t -cf ... && service ... restart` | Validasi sintaks dulu, service baru di-restart bila valid |
+
+> File `net3.conf` sudah di-`include` dari `dhcpd.conf` pada Soal 2, jadi `dhcpd.conf` tidak perlu diubah. Script ini hanya menimpa isi `net3.conf`.
+
+> Client Network 3 yang MAC-nya belum terdaftar di kelas mana pun (misalnya kugisaki sebelum Soal 6) tidak akan memperoleh alamat, karena kedua pool dibatasi dengan `allow members of`.
+
+---
+
+#### 2. Client meminta lease baru
+
+Jalankan di ino, kusakabe, dan miwa:
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+ip route
+cat /etc/resolv.conf
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `killall udhcpc` | Menghentikan klien DHCP lama supaya tidak bentrok |
+| `ip addr flush dev eth0` | Membuang IP lama (dari scope sementara Soal 3) |
+| `udhcpc -i eth0` | Meminta lease baru. Permintaan melewati jichi (relay) menuju tengen |
+| `ip -br addr`, `ip route`, `cat /etc/resolv.conf` | Memeriksa IP, gateway, dan DNS yang diterima |
+
+Hasil yang diharapkan:
+- ino dan kusakabe memperoleh IP di `10.90.3.10 - 10.90.3.89` dengan lease time 1800.
+- miwa memperoleh IP di `10.90.3.100 - 10.90.3.199` dengan lease time 43200.
+- Gateway `10.90.3.1`, DNS `10.90.1.2` dan `10.90.1.3`.
+
+##### Bukti :
+ino (short lease) : memperoleh `10.90.3.10/24` dari server `10.90.4.10`, lease time 1773, default via `10.90.3.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal5-ino.png)
+
+kusakabe (short lease) : memperoleh `10.90.3.11/24` dari server `10.90.4.10`, lease time 1800, default via `10.90.3.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal5-kusakabe.png)
+
+miwa (long lease) : memperoleh `10.90.3.100/24` dari server `10.90.4.10`, lease time 43200, default via `10.90.3.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal5-miwa.png)
+
+> Pada ino, lease time tertulis 1773, bukan 1800. Ini karena ino masih memegang lease `10.90.3.10` yang dibuat sebelumnya, sehingga udhcpc melaporkan **sisa** waktu lease yang sedang berjalan. Batas lease yang diberikan server tetap 1800 detik, terbukti dari kolom `ends` di `dhcpd.leases` (lihat bagian berikut).
+
+Ringkasan hasil:
+
+| Client | Kelas | IP yang diterima | Lease time | Di dalam rentang? |
+|---|---|---|---|---|
+| ino | short | 10.90.3.10 | 1773 (sisa dari 1800) | Ya (10 - 89) |
+| kusakabe | short | 10.90.3.11 | 1800 | Ya (10 - 89) |
+| miwa | long | 10.90.3.100 | 43200 | Ya (100 - 199) |
+
+---
+
+#### 3. Bukti di sisi server (tengen)
+
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+cat /etc/dhcp/net3.conf
+grep -E "^lease|hardware ethernet|ends" /var/lib/dhcp/dhcpd.leases | tail -20
+```
+
+Hasil yang diharapkan:
+- `dhcpd -t` tidak mengeluarkan error dan status service **dhcpd is running**.
+- `net3.conf` berisi dua class, tiga subclass, dan dua pool sesuai tabel di atas.
+- `dhcpd.leases` mencatat lease ino dan kusakabe berdurasi 30 menit, serta lease miwa berdurasi 12 jam.
+
+##### Bukti :
+tengen (status service dan isi `net3.conf`) :
+![](assets/soal5-tengen.png)
+![](assets/soal5-tengen2.png)
+
+Pencocokan lease di tengen (waktu `ends` pada `dhcpd.leases` memakai UTC):
+
+| IP | MAC address | Client | `ends` | Keterangan |
+|---|---|---|---|---|
+| 10.90.3.10 | `02:42:c9:06:06:00` | ino | 2026/10/12 14:13:47 | Lease dibuat 13:43:47, berdurasi 30 menit |
+| 10.90.3.11 | `02:42:33:cb:b7:00` | kusakabe | 2026/10/12 14:14:40 | Lease dibuat 13:44:40, berdurasi 30 menit |
+| 10.90.3.100 | `02:42:46:ce:21:00` | miwa | 2026/10/13 01:44:56 | Lease dibuat 13:44:56, berdurasi 12 jam |
+
+Dari tabel terlihat selisih waktu lease ino dan kusakabe 30 menit, sedangkan miwa 12 jam, sesuai kebijakan short lease dan long lease.
+
+> Entri lease Network 2 (`10.90.2.x`) yang ikut muncul pada `tail` adalah sisa lease Soal 4 dan tidak berkaitan dengan Soal 5.
+
+> Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), `bash /root/tengen-dhcp.sh` (Soal 2), `bash /root/tengen-net2.sh` (Soal 4), lalu `bash /root/tengen-net3.sh` (Soal 5) agar `net2.conf` dan `net3.conf` kembali berisi kebijakan pool final.
+
+---
