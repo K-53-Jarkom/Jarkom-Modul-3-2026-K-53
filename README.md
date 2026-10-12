@@ -341,11 +341,13 @@ Dari tengen (Network 4) ke utahime (Network 1):
 ping -c 3 10.90.1.2
 ```
 ![](assets/soal1-tengen2.png)
+
 Dari utahime ke tengen:
 ```bash
 ping -c 3 10.90.4.10
 ```
 ![](assets/soal1-utahime.png)
+
 TTL yang turun menjadi 63 menandakan paket melewati satu router (jichi).
 
 > Jika node di-stop lalu di-start lagi, konfigurasi IP hilang. Cukup jalankan ulang script di `/root` pada node tersebut (`bash /root/jichi.sh`, `bash /root/tengen.sh`, dan seterusnya).
