@@ -586,3 +586,198 @@ MAC `02:42:9e:05:11:00` adalah eth0 itadori dan `02:42:c9:06:06:00` adalah eth0 
 > Jika jichi di-stop lalu di-start lagi, konfigurasi IP hilang dan relay tidak berjalan. Jalankan ulang `bash /root/jichi.sh`, lalu `service isc-dhcp-relay restart`.
 
 ---
+
+### Soal 4 : Dua Pool DHCP pada Network 2 dengan DHCP Class (tengen)
+
+Tim Dev dan Support di Divisi A (Network 2) harus menerima jatah alamat yang berbeda, padahal semua client berada pada subnet yang sama (`10.90.2.0/24`). Karena itu pada soal ini scope sementara Network 2 dari Soal 2 diganti dengan **dua pool** yang dipisahkan memakai **DHCP class berdasarkan MAC address**.
+
+#### Gambaran pembagian
+
+| Pool | Client | Rentang IP | Keterangan |
+|---|---|---|---|
+| Pool 1 | itadori, fushiguro | 10.90.2.10 - 10.90.2.35 | Dev |
+| Pool 2 | zenin, okkotsu | 10.90.2.70 - 10.90.2.95 | Support |
+| - | - | 10.90.2.36 - 10.90.2.69 | **Tidak boleh dialokasikan** (sengaja tidak dimasukkan ke pool mana pun) |
+
+MAC address eth0 tiap client (diambil dari `ip link show eth0` atau dari alamat link-local pada `ip -br addr`):
+
+| Client | MAC address eth0 | Class |
+|---|---|---|
+| itadori | `02:42:9e:05:11:00` | pool1 |
+| fushiguro | `02:42:d6:c7:fd:00` | pool1 |
+| zenin | `02:42:a7:06:c5:00` | pool2 |
+| okkotsu | `02:42:1e:db:db:00` | pool2 |
+
+> Semua langkah konfigurasi dikerjakan di konsol **tengen**. Verifikasi dikerjakan di keempat client dan tengen.
+
+---
+
+#### 1. Konfigurasi class dan pool (tengen)
+
+Buka konsol tengen, lalu jalankan:
+```bash
+cat > /root/tengen-net2.sh << 'EOF'
+#!/bin/bash
+MAC_ITADORI="02:42:9e:05:11:00"
+MAC_FUSHIGURO="02:42:d6:c7:fd:00"
+MAC_ZENIN="02:42:a7:06:c5:00"
+MAC_OKKOTSU="02:42:1e:db:db:00"
+
+cat > /etc/dhcp/net2.conf << EOT
+# Kelas client Network 2 berdasarkan MAC address
+class "pool1" {
+  match hardware;
+}
+subclass "pool1" 1:$MAC_ITADORI;
+subclass "pool1" 1:$MAC_FUSHIGURO;
+
+class "pool2" {
+  match hardware;
+}
+subclass "pool2" 1:$MAC_ZENIN;
+subclass "pool2" 1:$MAC_OKKOTSU;
+
+subnet 10.90.2.0 netmask 255.255.255.0 {
+  option subnet-mask 255.255.255.0;
+  option routers 10.90.2.1;
+  option broadcast-address 10.90.2.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+
+  # Pool 1: itadori dan fushiguro
+  pool {
+    allow members of "pool1";
+    range 10.90.2.10 10.90.2.35;
+  }
+
+  # Pool 2: zenin dan okkotsu
+  pool {
+    allow members of "pool2";
+    range 10.90.2.70 10.90.2.95;
+  }
+  # 10.90.2.36 - 10.90.2.69 sengaja tidak dimasukkan ke pool mana pun
+}
+EOT
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-net2.sh
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `class "pool1" { match hardware; }` | Membuat kelas yang mencocokkan client berdasarkan hardware address (tipe + MAC) dari paket DHCP |
+| `subclass "pool1" 1:<MAC>` | Memasukkan satu MAC ke kelas `pool1`. Awalan `1:` adalah tipe hardware Ethernet |
+| `pool { allow members of "pool1"; range ...; }` | Pool hanya boleh dipakai anggota kelas `pool1`, dengan rentang `10.90.2.10 - 10.90.2.35` |
+| `pool { allow members of "pool2"; range ...; }` | Pool hanya boleh dipakai anggota kelas `pool2`, dengan rentang `10.90.2.70 - 10.90.2.95` |
+| `10.90.2.36 - 10.90.2.69` | Tidak ada `range` yang mencakupnya, sehingga dhcpd tidak akan pernah mengalokasikannya |
+| `option routers/broadcast/domain-name-servers/domain-search` | Opsi yang sama seperti Soal 2: gateway `10.90.2.1`, broadcast `10.90.2.255`, DNS `10.90.1.2` dan `10.90.1.3`, domain-search `K53.com` |
+| `dhcpd -t -cf ... && service ... restart` | Validasi sintaks dulu, service baru di-restart bila valid |
+
+> File `net2.conf` sudah di-`include` dari `dhcpd.conf` pada Soal 2, jadi `dhcpd.conf` tidak perlu diubah. Script ini hanya menimpa isi `net2.conf`.
+
+> Jika client tidak memperoleh alamat, periksa lagi MAC pada script. Pada font terminal, angka `1` bisa terlihat mirip huruf `l`, padahal hex tidak punya huruf `l`. Contohnya MAC okkotsu adalah `02:42:1e:db:db:00`, sesuai dengan alamat link-local `fe80::42:1eff:fedb:db01` pada `ip -br addr` di okkotsu.
+
+Verifikasi konfigurasi di tengen:
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+cat /etc/dhcp/net2.conf
+```
+Hasil yang diharapkan:
+- `dhcpd -t` tidak mengeluarkan error.
+- Status service **dhcpd is running**.
+- `net2.conf` berisi dua class, empat subclass, dan dua pool sesuai tabel di atas.
+
+##### Bukti :
+tengen :
+![](assets/soal4-tengen.png)
+
+---
+
+#### 2. Client meminta lease baru
+
+Jalankan di keempat client (itadori, fushiguro, zenin, okkotsu):
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+ip route
+cat /etc/resolv.conf
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `killall udhcpc` | Menghentikan klien DHCP lama supaya tidak bentrok |
+| `ip addr flush dev eth0` | Membuang IP lama (misalnya dari pool sementara Soal 2 dan 3) |
+| `udhcpc -i eth0` | Meminta lease baru. Permintaan melewati jichi (relay) menuju tengen |
+| `ip -br addr`, `ip route`, `cat /etc/resolv.conf` | Memeriksa IP, gateway, dan DNS yang diterima |
+
+Hasil yang diharapkan:
+- itadori dan fushiguro memperoleh IP di `10.90.2.10 - 10.90.2.35`.
+- zenin dan okkotsu memperoleh IP di `10.90.2.70 - 10.90.2.95`.
+- Gateway `10.90.2.1`, DNS `10.90.1.2` dan `10.90.1.3`.
+
+##### Bukti :
+itadori (Pool 1) : memperoleh `10.90.2.10/24` dari server `10.90.4.10`, default via `10.90.2.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal4-itadori.png)
+
+fushiguro (Pool 1) : memperoleh `10.90.2.11/24` dari server `10.90.4.10`, default via `10.90.2.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal4-fushiguro.png)
+
+zenin (Pool 2) : memperoleh `10.90.2.70/24` dari server `10.90.4.10`, default via `10.90.2.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal4-zenin.png)
+
+okkotsu (Pool 2) : memperoleh `10.90.2.71/24` dari server `10.90.4.10`, default via `10.90.2.1`, nameserver `10.90.1.2` dan `10.90.1.3`.
+![](assets/soal4-okkotsu.png)
+
+Ringkasan hasil:
+
+| Client | Pool | IP yang diterima | Di dalam rentang? |
+|---|---|---|---|
+| itadori | Pool 1 | 10.90.2.10 | Ya (10 - 35) |
+| fushiguro | Pool 1 | 10.90.2.11 | Ya (10 - 35) |
+| zenin | Pool 2 | 10.90.2.70 | Ya (70 - 95) |
+| okkotsu | Pool 2 | 10.90.2.71 | Ya (70 - 95) |
+
+Tidak ada client yang memperoleh alamat di rentang `10.90.2.36 - 10.90.2.69`.
+
+---
+
+#### 3. Bukti di sisi server (tengen)
+
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+grep -E "^lease|hardware ethernet" /var/lib/dhcp/dhcpd.leases
+```
+
+Hasil yang diharapkan: tengen mencatat lease untuk keempat client Network 2, masing-masing dengan MAC yang sesuai kelasnya.
+
+##### Bukti :
+tengen :
+![](assets/soal4-tengen2.png)
+
+Pencocokan lease dengan MAC:
+
+| IP | MAC address | Client | Pool |
+|---|---|---|---|
+| 10.90.2.10 | `02:42:9e:05:11:00` | itadori | Pool 1 |
+| 10.90.2.11 | `02:42:d6:c7:fd:00` | fushiguro | Pool 1 |
+| 10.90.2.70 | `02:42:a7:06:c5:00` | zenin | Pool 2 |
+| 10.90.2.71 | `02:42:1e:db:db:00` | okkotsu | Pool 2 |
+
+> Satu IP dapat muncul beberapa kali di `dhcpd.leases` karena file ini bersifat log yang terus ditambah setiap lease dibuat atau diperbarui. Entri paling bawah untuk suatu IP adalah yang berlaku.
+
+> Pada Soal 3, itadori sudah memperoleh `10.90.2.10` dari scope sementara. Setelah pool dipisah, itadori tetap memperoleh alamat yang sama karena `10.90.2.10` memang awal Pool 1, sehingga hasilnya konsisten.
+
+> Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), `bash /root/tengen-dhcp.sh` (Soal 2), lalu `bash /root/tengen-net2.sh` (Soal 4) agar `net2.conf` kembali berisi dua pool.
+
+---
