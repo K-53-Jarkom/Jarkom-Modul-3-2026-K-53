@@ -476,3 +476,113 @@ Hasil di atas sesuai harapan: validasi konfigurasi lolos tanpa error, `dhcpd is 
 > Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), lalu `bash /root/tengen-dhcp.sh`.
  
 ---
+
+### Soal 3 : DHCP Relay (jichi)
+
+Permintaan alamat dari Divisi A (Network 2) dan Divisi B (Network 3) berupa broadcast, sehingga tidak bisa menyeberangi subnet secara langsung menuju DHCP server di Network 4. Pada soal ini jichi dikonfigurasi sebagai **DHCP Relay** menuju tengen (`10.90.4.10`), menggunakan **eth2** untuk Network 2 dan **eth3** untuk Network 3. Setelah itu dibuktikan bahwa client dari kedua subnet berhasil memperoleh lease melalui relay.
+
+#### Alur kerja
+
+| Langkah | Keterangan |
+|---|---|
+| 1 | Client di Network 2 atau 3 mengirim DHCPDISCOVER (broadcast) |
+| 2 | jichi menerima di eth2 atau eth3, lalu meneruskan ke tengen `10.90.4.10` lewat eth4 dengan alamat relay (giaddr) `10.90.2.1` atau `10.90.3.1` |
+| 3 | tengen mencocokkan giaddr dengan subnet yang sesuai (`net2.conf` atau `net3.conf`) dan mengirim penawaran |
+| 4 | jichi meneruskan balasan ke client |
+
+> Semua langkah konfigurasi dikerjakan di konsol **jichi**. Verifikasi dikerjakan di client dan tengen.
+
+---
+
+#### 1. Konfigurasi relay (jichi)
+
+Buka konsol jichi, lalu jalankan:
+```bash
+cat > /root/jichi-relay.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+apt update && apt install -y isc-dhcp-relay
+
+cat > /etc/default/isc-dhcp-relay << 'EOT'
+SERVERS="10.90.4.10"
+INTERFACES="eth2 eth3 eth4"
+OPTIONS=""
+EOT
+
+service isc-dhcp-relay restart
+EOF
+
+bash /root/jichi-relay.sh
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `apt install isc-dhcp-relay` | Memasang DHCP relay agent (`dhcrelay`) |
+| `SERVERS="10.90.4.10"` | Alamat DHCP server (tengen) tujuan forward |
+| `INTERFACES="eth2 eth3 eth4"` | eth2 dan eth3 menerima permintaan dari client Network 2 dan 3. eth4 adalah jalur menuju tengen, dimasukkan supaya balasan server dapat diterima relay |
+| `service isc-dhcp-relay restart` | Menjalankan relay dengan konfigurasi baru |
+
+> Saat instalasi muncul pesan `invoke-rc.d: policy-rc.d denied execution of start`. Ini normal di container: service tidak otomatis start setelah install, sehingga `service isc-dhcp-relay restart` pada script yang menjalankannya.
+
+Verifikasi di jichi:
+```bash
+service isc-dhcp-relay status
+ps aux | grep [d]hcrelay
+cat /etc/default/isc-dhcp-relay
+```
+Hasil yang diharapkan:
+- Proses `/usr/sbin/dhcrelay -q -i eth2 -i eth3 -i eth4 10.90.4.10` berjalan.
+- `SERVERS="10.90.4.10"` dan `INTERFACES="eth2 eth3 eth4"`.
+
+##### Bukti :
+jichi :
+![](assets/soal3-jichi.png)
+
+---
+
+#### 2. Client memperoleh lease lewat relay
+
+Jalankan di satu client Network 2 (itadori) dan satu client Network 3 (ino):
+```bash
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+ip route
+cat /etc/resolv.conf
+ping -c 3 10.90.4.10
+```
+
+Hasil yang diharapkan:
+- itadori memperoleh IP dari pool Network 2 (`10.90.2.10 - 10.90.2.35`) dengan gateway `10.90.2.1`.
+- ino memperoleh IP dari pool Network 3 (`10.90.3.10 - 10.90.3.89`) dengan gateway `10.90.3.1`.
+- `resolv.conf` berisi nameserver `10.90.1.2` dan `10.90.1.3`.
+- Ping ke tengen berhasil. TTL 63 menandakan paket melewati satu router (jichi).
+
+##### Bukti :
+itadori (Network 2) : memperoleh `10.90.2.10/24`, server `10.90.4.10`, lease time 600, default via `10.90.2.1`.
+![](assets/soal3-itadori.png)
+
+ino (Network 3) : memperoleh `10.90.3.10/24`, server `10.90.4.10`, lease time 600, default via `10.90.3.1`.
+![](assets/soal3-ino.png)
+
+---
+
+#### 3. Bukti di sisi server (tengen)
+
+```bash
+grep -E "lease|client-hostname|hardware" /var/lib/dhcp/dhcpd.leases | tail -20
+```
+
+Hasil yang diharapkan: tengen mencatat dua lease dari subnet berbeda (`10.90.2.10` dan `10.90.3.10`) dengan MAC address masing-masing client.
+
+##### Bukti :
+tengen :
+![](assets/soal3-tengen.png)
+
+MAC `02:42:9e:05:11:00` adalah eth0 itadori dan `02:42:c9:06:06:00` adalah eth0 ino, sesuai dengan alamat link-local pada output `ip -br addr` di masing-masing client.
+
+> Jika jichi di-stop lalu di-start lagi, konfigurasi IP hilang dan relay tidak berjalan. Jalankan ulang `bash /root/jichi.sh`, lalu `service isc-dhcp-relay restart`.
+
+---
