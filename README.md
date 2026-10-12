@@ -353,3 +353,126 @@ TTL yang turun menjadi 63 menandakan paket melewati satu router (jichi).
 > Jika node di-stop lalu di-start lagi, konfigurasi IP hilang. Cukup jalankan ulang script di `/root` pada node tersebut (`bash /root/jichi.sh`, `bash /root/tengen.sh`, dan seterusnya).
 
 ---
+
+### Soal 2 : DHCP Server (tengen), Subnet Lokal Tanpa Pool, dan Scope Network 2 & 3
+ 
+Pada soal ini tengen (`10.90.4.10`, Network 4 / Data Center) disiapkan sebagai DHCP server untuk seluruh jaringan. Ada empat hal yang dikerjakan:
+ 
+1. Install `isc-dhcp-server` di tengen.
+2. Deklarasikan Network 4 sebagai subnet lokal **tanpa pool** (tanpa `range`).
+3. Siapkan scope untuk Network 2 dan Network 3.
+4. Validasi konfigurasi sampai tidak ada error **"No subnet declaration for eth0"**.
+#### Gambaran scope
+ 
+| Network | Subnet | Gateway | Pool | Keterangan |
+|---|---|---|---|---|
+| Network 4 (Data Center) | 10.90.4.0/24 | 10.90.4.1 | tidak ada | Hanya deklarasi subnet lokal, supaya dhcpd bisa jalan di eth0 |
+| Network 2 (Divisi A) | 10.90.2.0/24 | 10.90.2.1 | 10.90.2.10 - 10.90.2.35 | Sementara, kebijakan pool final diganti di Soal 4 |
+| Network 3 (Divisi B) | 10.90.3.0/24 | 10.90.3.1 | 10.90.3.10 - 10.90.3.89 | Sementara, kebijakan pool final diganti di Soal 5 |
+ 
+Opsi yang dibagikan ke client Network 2 dan 3: DNS `10.90.1.2` dan `10.90.1.3` (utahime dan shoko), serta domain-search `K53.com`.
+ 
+> Semua langkah dikerjakan di konsol **tengen**.
+ 
+---
+ 
+#### 1. Install dan konfigurasi (tengen)
+ 
+Buka konsol tengen, lalu jalankan:
+```bash
+cat > /root/tengen-dhcp.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt update && apt install -y isc-dhcp-server
+ 
+# DHCP hanya dilayani lewat eth0 (Network 4)
+sed -i 's/^INTERFACESv4=.*/INTERFACESv4="eth0"/' /etc/default/isc-dhcp-server
+ 
+# File utama
+cat > /etc/dhcp/dhcpd.conf << 'EOT'
+ddns-update-style none;
+authoritative;
+default-lease-time 600;
+max-lease-time 7200;
+ 
+# Network 4 (Data Center): subnet lokal tanpa pool dinamis
+subnet 10.90.4.0 netmask 255.255.255.0 {
+}
+ 
+# Network 2 dan 3 dipisah ke file masing-masing
+include "/etc/dhcp/net2.conf";
+include "/etc/dhcp/net3.conf";
+EOT
+ 
+# Scope sementara Network 2 (akan diganti di Soal 4)
+cat > /etc/dhcp/net2.conf << 'EOT'
+subnet 10.90.2.0 netmask 255.255.255.0 {
+  range 10.90.2.10 10.90.2.35;
+  option routers 10.90.2.1;
+  option broadcast-address 10.90.2.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+}
+EOT
+ 
+# Scope sementara Network 3 (akan diganti di Soal 5)
+cat > /etc/dhcp/net3.conf << 'EOT'
+subnet 10.90.3.0 netmask 255.255.255.0 {
+  range 10.90.3.10 10.90.3.89;
+  option routers 10.90.3.1;
+  option broadcast-address 10.90.3.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+}
+EOT
+ 
+touch /var/lib/dhcp/dhcpd.leases
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+ 
+bash /root/tengen-dhcp.sh
+```
+ 
+Penjelasan:
+ 
+| Bagian | Fungsi |
+|---|---|
+| `apt install isc-dhcp-server` | Memasang DHCP server (butuh internet, tengen sudah terhubung lewat jichi pada Soal 1) |
+| `INTERFACESv4="eth0"` | DHCP hanya mendengarkan di eth0, yang berada di Network 4 |
+| `ddns-update-style none` | Menonaktifkan dynamic DNS update (tidak dipakai) |
+| `authoritative` | tengen menjadi server resmi untuk subnet yang dideklarasikan |
+| `default-lease-time` dan `max-lease-time` | Lama lease default (600 detik) dan maksimum (7200 detik) |
+| `subnet 10.90.4.0 ... { }` | Network 4 dideklarasikan **tanpa `range`**. Ini yang menghilangkan error "No subnet declaration for eth0", karena dhcpd mewajibkan ada subnet yang cocok dengan IP interface yang dipakai |
+| `net2.conf` dan `net3.conf` | Scope Network 2 dan 3 dipisah ke file masing-masing lewat `include`. Rentang di sini **sementara** supaya Soal 3 (relay) bisa dibuktikan. Kebijakan pool sebenarnya diganti di Soal 4 dan 5 |
+| `option routers` dan `broadcast-address` | Gateway dan broadcast tiap network |
+| `domain-name-servers` dan `domain-search` | DNS `10.90.1.2` dan `10.90.1.3`, domain-search `K53.com` |
+| `touch /var/lib/dhcp/dhcpd.leases` | Memastikan file lease ada, supaya dhcpd tidak gagal start |
+| `dhcpd -t -cf ...` | Validasi sintaks sebelum service di-restart |
+ 
+---
+ 
+#### Verifikasi Soal 2
+ 
+Jalankan di tengen:
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+ss -ulnp | grep :67
+grep INTERFACES /etc/default/isc-dhcp-server
+```
+ 
+Hasil yang diharapkan:
+- `dhcpd -t` tidak mengeluarkan error. Pesan **"No subnet declaration for eth0"** tidak muncul.
+- Status service **running**.
+- `ss` menampilkan `dhcpd` mendengarkan di port 67 (`0.0.0.0:67`).
+- `INTERFACESv4="eth0"`.
+##### Bukti :
+tengen :
+![](assets/soal2-tengen.png)
+ 
+Hasil di atas sesuai harapan: validasi konfigurasi lolos tanpa error, `dhcpd is running`, dhcpd mendengarkan di port 67, dan `INTERFACESv4="eth0"`.
+ 
+> Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), lalu `bash /root/tengen-dhcp.sh`.
+ 
+---
