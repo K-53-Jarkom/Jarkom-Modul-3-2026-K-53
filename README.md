@@ -1246,8 +1246,6 @@ Penjelasan:
 ##### Bukti :
 tengen :
 ![](assets/soal7-tengen.png)
-![](assets/soal7-tengen2.png)
-![](assets/soal7-tengen3.png)
 
 Hasil di atas sesuai harapan: validasi konfigurasi lolos tanpa error, `dhcpd is running`, dan isi tiga file konfigurasi sesuai kebijakan Soal 4, 5, dan 6.
 
