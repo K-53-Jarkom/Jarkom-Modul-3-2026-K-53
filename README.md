@@ -1395,3 +1395,150 @@ Kesimpulan:
 > Lease time pada capture adalah 571 dan 1533, bukan 600 dan 1800. Ini karena kedua client masih memegang lease yang sebelumnya dibuat dan belum habis, sehingga yang ditawarkan adalah **sisa** waktu lease tersebut. Batas lease dari kebijakan server tetap 600 detik (Pool 1 / Network 2) dan 1800 detik (short lease / Network 3), sesuai Soal 4 dan Soal 5.
 
 ---
+
+### Soal 9 : Gangguan Jalur Relay dan Pemulihannya (jichi)
+
+Sebuah gangguan memutus jalur relay sehingga permintaan alamat tidak sampai ke Data Center. Pada soal ini service **DHCP Relay** di **jichi** dihentikan, lalu client Network 2 (itadori) dipaksa meminta lease baru dan gejalanya dicatat. Setelah itu relay dipulihkan, permintaan DHCP diulang, dan dibuktikan bahwa client kembali memperoleh alamat dari pool yang benar dengan gateway semula.
+
+#### Alur pengujian
+
+| Tahap | Node | Tindakan | Hasil yang diharapkan |
+|---|---|---|---|
+| 1 | jichi | Hentikan service relay | Proses relay berhenti |
+| 2 | tengen | Jalankan tcpdump selama 15 detik | Tidak ada paket DHCP yang tiba |
+| 3 | itadori | Minta lease baru | Gagal memperoleh lease, tanpa IP dan gateway |
+| 4 | jichi | Jalankan kembali service relay | Proses `dhcrelay` berjalan |
+| 5 | itadori | Minta lease baru | Memperoleh IP Pool 1 dan gateway `10.90.2.1` |
+
+> Client yang dipakai adalah itadori (Network 2, Pool 1 `10.90.2.10 - 10.90.2.35`, gateway `10.90.2.1`).
+
+---
+
+#### 1. Hentikan relay (jichi)
+
+Buka konsol jichi, lalu jalankan:
+```bash
+service isc-dhcp-relay stop
+service isc-dhcp-relay status
+ps aux | grep [d]hcrelay
+```
+
+##### Bukti :
+jichi :
+![](assets/soal9-jichi.png)
+
+Relay sudah dihentikan. Pada `ps` hanya tersisa entri `[dhcrelay]` dengan ukuran memori 0 dan tanpa command line `/usr/sbin/dhcrelay ...`. Itu adalah sisa proses yang sudah berakhir, bukan relay yang masih berjalan. Matinya fungsi relay dibuktikan lebih lanjut oleh tengen dan itadori pada langkah berikutnya.
+
+---
+
+#### 2. Capture di tengen saat relay mati
+
+Jalankan di tengen, lalu segera lakukan langkah 3 di itadori selama capture berjalan:
+```bash
+timeout 15 tcpdump -i eth0 -n 'udp and (port 67 or port 68)'
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `timeout 15` | Menghentikan capture otomatis setelah 15 detik |
+| `-i eth0` | Capture di interface tengen pada Network 4 |
+| `-n` | Alamat IP tampil apa adanya tanpa resolve nama |
+| `'udp and (port 67 or port 68)'` | Hanya lalu lintas DHCP |
+
+##### Bukti :
+tengen :
+![](assets/soal9-tengen.png)
+
+Capture selesai dengan `0 packets captured`: tidak ada satu pun paket DHCP yang sampai ke tengen. Ini membuktikan bahwa permintaan dari client Network 2 tidak diteruskan ke Data Center.
+
+---
+
+#### 3. Client meminta lease saat relay mati (itadori)
+
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0 -n -t 3 -T 2
+ip -br addr
+ip route
+ping -c 2 10.90.4.10
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `ip addr flush dev eth0` | Membuang IP lama supaya client benar-benar tanpa alamat |
+| `udhcpc -i eth0 -n -t 3 -T 2` | Mengirim 3 kali DISCOVER dengan jeda 2 detik, lalu keluar bila tidak ada jawaban (`-n`) |
+| `ip -br addr`, `ip route` | Memeriksa IP dan routing setelah percobaan |
+| `ping -c 2 10.90.4.10` | Menguji jangkauan ke tengen |
+
+##### Bukti :
+itadori :
+![](assets/soal9-itadori.png)
+
+Gejala yang tercatat:
+
+| Gejala | Keterangan |
+|---|---|
+| `udhcpc: broadcasting discover` muncul 3 kali | Client terus mengirim DISCOVER tetapi tidak ada OFFER yang kembali |
+| `udhcpc: failed to get a DHCP lease` dan `no lease, failing` | Permintaan lease gagal |
+| `eth0` tanpa alamat IPv4 | Hanya interface lain yang memiliki alamat link-local IPv6 |
+| `ip route` kosong | Tidak ada default gateway maupun route jaringan lokal |
+| `ping: connect: Network unreachable` | Client tidak dapat menjangkau tengen |
+
+Penyebabnya: DHCPDISCOVER dikirim secara broadcast dan tidak dapat menyeberangi subnet. Tanpa relay di jichi, broadcast dari Network 2 tidak pernah diteruskan ke tengen di Network 4 (terbukti dari capture yang kosong), sehingga tidak ada OFFER yang kembali.
+
+---
+
+#### 4. Pulihkan relay (jichi)
+
+```bash
+service isc-dhcp-relay start
+service isc-dhcp-relay status
+ps aux | grep [d]hcrelay
+```
+
+##### Bukti :
+jichi :
+![](assets/soal9-jichi2.png)
+
+Relay berjalan kembali dengan proses `/usr/sbin/dhcrelay -q -i eth2 -i eth3 -i eth4 10.90.4.10`, sama seperti konfigurasi pada Soal 3. Tiga baris `Requesting: eth2/eth3/eth4 as upstream: Y downstream: Y` menunjukkan relay mendaftarkan ketiga interface.
+
+---
+
+#### 5. Ulangi permintaan DHCP setelah pulih (itadori)
+
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+ip route
+cat /etc/resolv.conf
+ping -c 3 10.90.4.10
+```
+
+##### Bukti :
+itadori :
+![](assets/soal9-itadori2.png)
+
+Hasil setelah relay dipulihkan:
+
+| Pemeriksaan | Sebelum (relay mati) | Sesudah (relay pulih) |
+|---|---|---|
+| Lease | `no lease, failing` | `10.90.2.10` dari server `10.90.4.10`, lease time 600 |
+| IP eth0 | Tidak ada | `10.90.2.10/24` (Pool 1: 10.90.2.10 - 10.90.2.35) |
+| Default gateway | Tidak ada | `default via 10.90.2.1 dev eth0` |
+| DNS | - | `10.90.1.2` dan `10.90.1.3` |
+| Ping ke tengen (`10.90.4.10`) | `Network is unreachable` | 3 terkirim, 3 diterima, 0% loss, TTL 63 |
+
+itadori kembali memperoleh alamat dari pool yang benar (Pool 1) dengan gateway semula `10.90.2.1`. TTL 63 menandakan paket melewati satu router (jichi).
+
+> Jika jichi di-stop lalu di-start lagi, konfigurasi IP hilang dan relay tidak berjalan. Jalankan ulang `bash /root/jichi.sh`, lalu `bash /root/jichi-relay.sh`.
+
+---
