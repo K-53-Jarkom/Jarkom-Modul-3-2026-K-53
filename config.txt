@@ -1,0 +1,523 @@
+=====================================================================
+CONFIG.TXT - SETUP DARI NOL (HASIL SOAL 1 - 10), KELOMPOK K53
+Jarkom Modul 3 2026 - Curtain Protocol: Shibuya Incident
+=====================================================================
+
+Dokumen ini untuk menyiapkan jaringan dasar dari awal sebelum
+mengerjakan soal 11 dan seterusnya (DNS, database, worker, load
+balancer, reverse proxy, dst.).
+
+Semua perintah di bawah dijalankan di konsol node masing-masing
+(telnet / PuTTY ke alamat di Topology Summary GNS3).
+
+
+---------------------------------------------------------------------
+0. KONVENSI
+---------------------------------------------------------------------
+PREFIX IP        : 10.90
+Nama kelompok    : K53  (domain: K53.com)
+Image            : debinet (jichi, tengen, utahime, shoko, gojo, geto,
+                   worker, database)  |  alpinet (semua client)
+Lokasi script    : /root
+Resolver awal    : nameserver 192.168.122.1
+
+Pemetaan interface jichi:
+  eth0 -> NAT1        (WAN, 192.168.122.0/24)  IP 192.168.122.153
+  eth1 -> Network 1   (DMZ)          10.90.1.0/24   gateway 10.90.1.1
+  eth2 -> Network 2   (Divisi A)     10.90.2.0/24   gateway 10.90.2.1
+  eth3 -> Network 3   (Divisi B)     10.90.3.0/24   gateway 10.90.3.1
+  eth4 -> Network 4   (Data Center)  10.90.4.0/24   gateway 10.90.4.1
+
+Catatan: nama switch GNS3 tidak sama dengan nomor network
+(Switch4 = Network 3, Switch3 = Network 4). Patokannya isi switch dan
+nomor interface jichi.
+
+Alamat host infrastruktur (statis):
+  Node      Network  IP            Gateway
+  utahime   1        10.90.1.2     10.90.1.1
+  shoko     1        10.90.1.3     10.90.1.1
+  gojo      1        10.90.1.4     10.90.1.1
+  tengen    4        10.90.4.10    10.90.4.1
+  geto      4        10.90.4.20    10.90.4.1
+  maki      4        10.90.4.31    10.90.4.1
+  panda     4        10.90.4.32    10.90.4.1
+  nanami    4        10.90.4.41    10.90.4.1
+  todo      4        10.90.4.42    10.90.4.1
+  kirara    4        10.90.4.43    10.90.4.1
+  yaga      4        10.90.4.51    10.90.4.1
+  inumaki   4        10.90.4.52    10.90.4.1
+
+Client Network 2 dan 3 TIDAK diberi IP statis (dapat dari DHCP):
+  Network 2: itadori, fushiguro, zenin, okkotsu
+  Network 3: ino, kusakabe, miwa, kugisaki
+
+Hasil alokasi DHCP yang diharapkan:
+  itadori   10.90.2.10   (Pool 1: 10.90.2.10 - 10.90.2.35)
+  fushiguro 10.90.2.11   (Pool 1)
+  zenin     10.90.2.70   (Pool 2: 10.90.2.70 - 10.90.2.95)
+  okkotsu   10.90.2.71   (Pool 2)
+  ino       10.90.3.10   (short lease 1800 detik, pool 10.90.3.10 - 89)
+  kusakabe  10.90.3.11   (short lease 1800 detik)
+  miwa      10.90.3.100  (long lease 43200 detik, pool 10.90.3.100 - 199)
+  kugisaki  10.90.3.99   (fixed address, di luar semua pool)
+  DNS yang dibagikan: 10.90.1.2 dan 10.90.1.3, domain-search K53.com
+
+
+---------------------------------------------------------------------
+1. URUTAN SETUP (RINGKAS)
+---------------------------------------------------------------------
+  1. Start semua node di GNS3, pastikan link jichi sesuai pemetaan.
+  2. jichi          : bagian 2 (jichi.sh)  -> cek internet
+  3. Host statis    : bagian 3 (tengen, utahime, shoko, gojo, dst.)
+  4. tengen         : bagian 4 (DHCP server + pool + static lease)
+  5. jichi          : bagian 5 (DHCP relay)
+  6. Client         : bagian 6 (minta lease, cek)
+  7. Persisten      : bagian 7 (supaya hidup sendiri setelah restart)
+
+PENTING: kerjakan urutan di atas. tengen butuh internet (lewat jichi)
+untuk apt install, dan relay butuh tengen sudah hidup.
+
+
+---------------------------------------------------------------------
+2. JICHI (ROUTER UTAMA, NAT, FORWARDING)
+---------------------------------------------------------------------
+Jalankan di konsol jichi:
+
+cat > /root/jichi.sh << 'EOF'
+#!/bin/bash
+# WAN: eth0 ke NAT GNS3 (statis, dhclient tidak tersedia di image ini)
+ip addr flush dev eth0
+ip addr add 192.168.122.153/24 dev eth0
+ip link set eth0 up
+ip route replace default via 192.168.122.1
+
+# LAN: eth1 - eth4 menjadi gateway Network 1 - 4
+for i in 1 2 3 4; do
+  ip addr flush dev eth$i
+  ip addr add 10.90.$i.1/24 dev eth$i
+  ip link set eth$i up
+done
+
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+
+# IPv4 forwarding dan source NAT
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -F POSTROUTING
+iptables -t nat -A POSTROUTING -o eth0 -s 10.90.0.0/16 -j MASQUERADE
+EOF
+
+bash /root/jichi.sh
+
+Verifikasi:
+  ip -br addr
+  ip route
+  sysctl net.ipv4.ip_forward
+  iptables -t nat -L POSTROUTING -n -v
+  ping -c 3 192.168.122.1
+  ping -c 3 8.8.8.8
+  ping -c 3 google.com
+
+Jika ping ke 192.168.122.1 gagal atau alamat bentrok, ganti .153
+dengan angka lain (subnet NAT dipakai bersama).
+
+
+---------------------------------------------------------------------
+3. HOST INFRASTRUKTUR (IP STATIS)
+---------------------------------------------------------------------
+Template (ganti NAME, IP, GW sesuai tabel di bagian 0).
+Contoh untuk utahime:
+
+NAME=utahime; IP=10.90.1.2; GW=10.90.1.1
+cat > /root/$NAME.sh << EOF
+ip addr flush dev eth0
+ip addr add $IP/24 dev eth0
+ip link set eth0 up
+ip route replace default via $GW
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+EOF
+bash /root/$NAME.sh
+
+Nilai tiap node:
+  NAME=shoko   IP=10.90.1.3   GW=10.90.1.1
+  NAME=gojo    IP=10.90.1.4   GW=10.90.1.1
+  NAME=tengen  IP=10.90.4.10  GW=10.90.4.1
+  NAME=geto    IP=10.90.4.20  GW=10.90.4.1
+  NAME=maki    IP=10.90.4.31  GW=10.90.4.1
+  NAME=panda   IP=10.90.4.32  GW=10.90.4.1
+  NAME=nanami  IP=10.90.4.41  GW=10.90.4.1
+  NAME=todo    IP=10.90.4.42  GW=10.90.4.1
+  NAME=kirara  IP=10.90.4.43  GW=10.90.4.1
+  NAME=yaga    IP=10.90.4.51  GW=10.90.4.1
+  NAME=inumaki IP=10.90.4.52  GW=10.90.4.1
+
+Verifikasi di tiap host:
+  ip -br addr
+  ping -c 3 <gateway>
+  ping -c 3 8.8.8.8
+  ping -c 3 google.com
+
+Routing antar network (contoh): dari tengen
+  ping -c 3 10.90.1.2        (TTL 63 = lewat jichi)
+
+
+---------------------------------------------------------------------
+4. TENGEN (DHCP SERVER, POOL, STATIC LEASE)
+---------------------------------------------------------------------
+Prasyarat: tengen sudah punya IP (bagian 3) dan bisa ping 8.8.8.8.
+
+--- 4.1 Install dan scope dasar ---
+
+cat > /root/tengen-dhcp.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+# Pakai ';' (bukan '&&'): apt update bisa gagal pada repo
+# debian-security (error tanda tangan), tapi paket tetap bisa dipasang.
+apt update; apt install -y isc-dhcp-server
+
+# DHCP hanya dilayani lewat eth0 (Network 4)
+sed -i 's/^INTERFACESv4=.*/INTERFACESv4="eth0"/' /etc/default/isc-dhcp-server
+
+cat > /etc/dhcp/dhcpd.conf << 'EOT'
+ddns-update-style none;
+authoritative;
+default-lease-time 600;
+max-lease-time 7200;
+
+# Network 4 (Data Center): subnet lokal tanpa pool dinamis
+subnet 10.90.4.0 netmask 255.255.255.0 {
+}
+
+include "/etc/dhcp/net2.conf";
+include "/etc/dhcp/net3.conf";
+EOT
+
+# Scope sementara (ditimpa oleh tengen-net2.sh dan tengen-net3.sh)
+cat > /etc/dhcp/net2.conf << 'EOT'
+subnet 10.90.2.0 netmask 255.255.255.0 {
+  range 10.90.2.10 10.90.2.35;
+  option routers 10.90.2.1;
+  option broadcast-address 10.90.2.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+}
+EOT
+
+cat > /etc/dhcp/net3.conf << 'EOT'
+subnet 10.90.3.0 netmask 255.255.255.0 {
+  range 10.90.3.10 10.90.3.89;
+  option routers 10.90.3.1;
+  option broadcast-address 10.90.3.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+}
+EOT
+
+touch /var/lib/dhcp/dhcpd.leases
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-dhcp.sh
+
+--- 4.2 Network 2: dua pool berdasarkan MAC ---
+
+PERIKSA DULU MAC client di GNS3 kamu (MAC bisa berbeda di tiap
+project). Di tiap client:  cat /sys/class/net/eth0/address
+Nilai di bawah adalah MAC project asal; ganti bila berbeda.
+
+cat > /root/tengen-net2.sh << 'EOF'
+#!/bin/bash
+MAC_ITADORI="02:42:9e:05:11:00"
+MAC_FUSHIGURO="02:42:d6:c7:fd:00"
+MAC_ZENIN="02:42:a7:06:c5:00"
+MAC_OKKOTSU="02:42:1e:db:db:00"
+
+cat > /etc/dhcp/net2.conf << EOT
+class "pool1" {
+  match hardware;
+}
+subclass "pool1" 1:$MAC_ITADORI;
+subclass "pool1" 1:$MAC_FUSHIGURO;
+
+class "pool2" {
+  match hardware;
+}
+subclass "pool2" 1:$MAC_ZENIN;
+subclass "pool2" 1:$MAC_OKKOTSU;
+
+subnet 10.90.2.0 netmask 255.255.255.0 {
+  option subnet-mask 255.255.255.0;
+  option routers 10.90.2.1;
+  option broadcast-address 10.90.2.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+
+  pool {
+    allow members of "pool1";
+    range 10.90.2.10 10.90.2.35;
+  }
+
+  pool {
+    allow members of "pool2";
+    range 10.90.2.70 10.90.2.95;
+  }
+  # 10.90.2.36 - 10.90.2.69 sengaja tidak masuk pool mana pun
+}
+EOT
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-net2.sh
+
+--- 4.3 Network 3: short lease dan long lease ---
+
+cat > /root/tengen-net3.sh << 'EOF'
+#!/bin/bash
+MAC_INO="02:42:c9:06:06:00"
+MAC_KUSAKABE="02:42:33:cb:b7:00"
+MAC_MIWA="02:42:46:ce:21:00"
+
+cat > /etc/dhcp/net3.conf << EOT
+# Short lease: 30 menit (1800 detik)
+class "short" {
+  match hardware;
+  default-lease-time 1800;
+  max-lease-time 1800;
+}
+subclass "short" 1:$MAC_INO;
+subclass "short" 1:$MAC_KUSAKABE;
+
+# Long lease: 12 jam (43200 detik)
+class "long" {
+  match hardware;
+  default-lease-time 43200;
+  max-lease-time 43200;
+}
+subclass "long" 1:$MAC_MIWA;
+
+subnet 10.90.3.0 netmask 255.255.255.0 {
+  option subnet-mask 255.255.255.0;
+  option routers 10.90.3.1;
+  option broadcast-address 10.90.3.255;
+  option domain-name-servers 10.90.1.2, 10.90.1.3;
+  option domain-search "K53.com";
+
+  pool {
+    allow members of "short";
+    range 10.90.3.10 10.90.3.89;
+  }
+
+  pool {
+    allow members of "long";
+    range 10.90.3.100 10.90.3.199;
+  }
+  # 10.90.3.90 - 10.90.3.99 tidak masuk pool (.99 untuk kugisaki)
+}
+EOT
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-net3.sh
+
+--- 4.4 Static lease kugisaki (10.90.3.99) ---
+
+cat > /root/tengen-kugisaki.sh << 'EOF'
+#!/bin/bash
+MAC_KUGISAKI="02:42:59:c7:e6:00"
+
+cat > /etc/dhcp/net3-static.conf << EOT
+host kugisaki {
+  hardware ethernet $MAC_KUGISAKI;
+  fixed-address 10.90.3.99;
+}
+EOT
+
+grep -q 'net3-static.conf' /etc/dhcp/dhcpd.conf || \
+  echo 'include "/etc/dhcp/net3-static.conf";' >> /etc/dhcp/dhcpd.conf
+
+dhcpd -t -cf /etc/dhcp/dhcpd.conf && service isc-dhcp-server restart
+EOF
+
+bash /root/tengen-kugisaki.sh
+
+URUTAN WAJIB: tengen-dhcp.sh -> tengen-net2.sh -> tengen-net3.sh ->
+tengen-kugisaki.sh (tengen-dhcp.sh menimpa dhcpd.conf, jadi jangan
+dijalankan ulang setelah tiga script lain tanpa mengulang ketiganya).
+
+Verifikasi di tengen:
+  dhcpd -t -cf /etc/dhcp/dhcpd.conf
+  service isc-dhcp-server status
+  grep -n include /etc/dhcp/dhcpd.conf
+  ss -ulnp | grep :67
+
+
+---------------------------------------------------------------------
+5. JICHI (DHCP RELAY)
+---------------------------------------------------------------------
+Jalankan di konsol jichi:
+
+cat > /root/jichi-relay.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+apt update; apt install -y isc-dhcp-relay
+
+cat > /etc/default/isc-dhcp-relay << 'EOT'
+SERVERS="10.90.4.10"
+INTERFACES="eth2 eth3 eth4"
+OPTIONS=""
+EOT
+
+service isc-dhcp-relay restart
+EOF
+
+bash /root/jichi-relay.sh
+
+Verifikasi:
+  service isc-dhcp-relay status
+  ps aux | grep [d]hcrelay
+  (harus ada: /usr/sbin/dhcrelay -q -i eth2 -i eth3 -i eth4 10.90.4.10)
+
+
+---------------------------------------------------------------------
+6. CLIENT NETWORK 2 DAN 3
+---------------------------------------------------------------------
+Di tiap client (itadori, fushiguro, zenin, okkotsu, ino, kusakabe,
+miwa, kugisaki):
+
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip addr show eth0 | grep -E "inet |brd"
+ip route
+cat /etc/resolv.conf
+ping -c 3 10.90.4.10
+ping -c 3 8.8.8.8
+
+Hasil: IP sesuai tabel bagian 0, lease time sesuai kebijakan
+(Network 2 dan kugisaki 600, short 1800, long 43200), gateway
+10.90.2.1 / 10.90.3.1, DNS 10.90.1.2 dan 10.90.1.3.
+Lease time bisa tampil lebih kecil (sisa lease yang masih aktif).
+
+Catatan domain-search: resolv.conf client tidak menampilkan baris
+"search" karena script udhcpc bawaan tidak memprosesnya. Untuk
+melihat opsinya sampai:
+  udhcpc -i eth0 -n -q -O search -s /tmp/dump.sh
+dengan /tmp/dump.sh berisi:
+  #!/bin/sh
+  env | grep -E "^(ip|subnet|router|broadcast|dns|domain|search)="
+(chmod +x /tmp/dump.sh dulu)
+
+
+---------------------------------------------------------------------
+7. SUPAYA HIDUP SENDIRI SETELAH RESTART (jichi dan tengen)
+---------------------------------------------------------------------
+Temuan: setelah node di-restart, IP/route/NAT hilang, dan service
+TIDAK otomatis jalan walaupun link S01... di /etc/rc2.d sudah ada
+(PID 1 node adalah dumb-init, bukan init system penuh). Paket,
+konfigurasi, dan script di /root TETAP ADA.
+
+Solusi (sudah diuji di jichi dan tengen): pasang IP statis dan
+perintah start service di /etc/network/interfaces memakai "up".
+
+--- 7.1 tengen ---
+update-rc.d isc-dhcp-server defaults
+update-rc.d isc-dhcp-server enable
+cp /etc/network/interfaces /root/interfaces.bak
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet static
+    address 10.90.4.10
+    netmask 255.255.255.0
+    gateway 10.90.4.1
+    up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+    up (rm -f /var/run/dhcpd.pid; service isc-dhcp-server start) || true
+EOF
+
+--- 7.2 jichi ---
+update-rc.d isc-dhcp-relay defaults
+update-rc.d isc-dhcp-relay enable
+cp /etc/network/interfaces /root/interfaces.bak
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet static
+    address 192.168.122.153
+    netmask 255.255.255.0
+    gateway 192.168.122.1
+    up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+    up sysctl -w net.ipv4.ip_forward=1 || true
+    up (iptables -t nat -F POSTROUTING; iptables -t nat -A POSTROUTING -o eth0 -s 10.90.0.0/16 -j MASQUERADE) || true
+
+auto eth1
+iface eth1 inet static
+    address 10.90.1.1
+    netmask 255.255.255.0
+
+auto eth2
+iface eth2 inet static
+    address 10.90.2.1
+    netmask 255.255.255.0
+
+auto eth3
+iface eth3 inet static
+    address 10.90.3.1
+    netmask 255.255.255.0
+
+auto eth4
+iface eth4 inet static
+    address 10.90.4.1
+    netmask 255.255.255.0
+    up (service isc-dhcp-relay start) || true
+EOF
+
+Cadangan template asli: /root/interfaces.bak
+(kembalikan: cp /root/interfaces.bak /etc/network/interfaces)
+
+--- 7.3 host infrastruktur lain (BELUM DIUJI) ---
+Pola yang sama kemungkinan bisa dipakai agar IP tidak hilang saat
+restart (ganti IP dan gateway sesuai tabel bagian 0):
+
+cp /etc/network/interfaces /root/interfaces.bak
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet static
+    address <IP>
+    netmask 255.255.255.0
+    gateway <GATEWAY>
+    up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+EOF
+
+Tiap service yang dipasang di soal berikutnya (bind9, mariadb,
+nginx, dst.) bisa ditambah satu baris "up (service <nama> start)
+|| true" di bawah dengan cara yang sama.
+
+Setelah restart, cek tanpa menjalankan script apa pun:
+  tengen: ip -br addr ; ps aux | grep [d]hcpd ; service isc-dhcp-server status
+  jichi : ip -br addr ; sysctl net.ipv4.ip_forward ;
+          iptables -t nat -L POSTROUTING -n ; ps aux | grep [d]hcrelay
+
+
+---------------------------------------------------------------------
+8. JEBAKAN YANG SUDAH PERNAH TERJADI
+---------------------------------------------------------------------
+- "dhclient: command not found" di jichi: eth0 tidak dapat IPv4 dari
+  NAT dan dhclient tidak ada. Pakai IP statis 192.168.122.153.
+- apt update gagal "Signature ... was created after the --not-after
+  date" pada debian-security: jam node tertinggal. Pakai
+  "apt update; apt install -y ..." (titik koma) supaya instalasi
+  tetap jalan. Jangan pakai "&&".
+- "No subnet declaration for eth0" saat dhcpd: subnet Network 4
+  (10.90.4.0/24) harus dideklarasikan (boleh kosong, tanpa range).
+- MAC address berbeda antar project GNS3: cek dengan
+  cat /sys/class/net/eth0/address sebelum mengisi script net2/net3/
+  kugisaki. Huruf "l" tidak ada di hex, itu angka "1".
+- Setelah restart service hidup dulu baru client bisa renew lease:
+  tengen (DHCP server) harus hidup sebelum relay dipakai.
+- Jika jichi dan tengen sama-sama baru di-restart, urutan menyala
+  tidak penting karena dhcpd dan relay dimulai lewat hook "up".
+- File status "dhcpd is not running but /var/run/dhcpd.pid exists"
+  berarti pid file basi: rm -f /var/run/dhcpd.pid lalu start ulang.
+
+=====================================================================
