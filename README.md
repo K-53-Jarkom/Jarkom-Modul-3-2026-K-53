@@ -1586,12 +1586,7 @@ Penjelasan:
 | `ls /etc/rc2.d/ \| grep dhcp` | Memeriksa link autostart: `S01isc-dhcp-server` di tengen dan `S01isc-dhcp-relay` di jichi |
 | `grep INTERFACES` dan `cat /etc/default/isc-dhcp-relay` | Memastikan `INTERFACESv4="eth0"` di tengen, serta `SERVERS="10.90.4.10"` dan `INTERFACES="eth2 eth3 eth4"` di jichi |
 
-##### Bukti (sebelum restart) :
-tengen :
-![](assets/soal10-tengen.png)
-
-jichi :
-![](assets/soal10-jichi.png)
+Link `S01isc-dhcp-server` (tengen) dan `S01isc-dhcp-relay` (jichi) terlihat pada keluaran `ls /etc/rc2.d/ | grep dhcp` di bukti bagian 2.
 
 Setelah itu tengen dan jichi di-restart lewat GNS3 (klik kanan node, **Stop**, lalu **Start**), dan kondisinya diperiksa **tanpa** menjalankan script apa pun:
 ```bash
@@ -1604,14 +1599,7 @@ service isc-dhcp-server status   # di jichi: service isc-dhcp-relay status
 ls /root/*.sh
 ```
 
-##### Bukti (setelah restart pertama) :
-tengen :
-![](assets/soal10-tengen2.png)
-
-jichi :
-![](assets/soal10-jichi2.png)
-
-Hasil setelah restart pertama:
+Hasil pengamatan setelah restart pertama:
 
 | Item | tengen | jichi |
 |---|---|---|
@@ -1693,17 +1681,17 @@ Penjelasan:
 | `/root/interfaces.bak` | Cadangan template asli. Kembalikan dengan `cp /root/interfaces.bak /etc/network/interfaces` bila perlu |
 
 ##### Bukti :
-tengen :
-![](assets/soal10-tengen3.png)
+tengen (`/etc/network/interfaces` dan link autostart `S01isc-dhcp-server`) :
+![](assets/soal10-tengen2.png)
 
-jichi :
-![](assets/soal10-jichi3.png)
+jichi (`/etc/network/interfaces` dan link autostart `S01isc-dhcp-relay`) :
+![](assets/soal10-jichi.png)
 
 ---
 
 #### 3. Restart kedua dan verifikasi layanan
 
-tengen dan jichi di-restart lagi lewat GNS3, lalu diperiksa **tanpa menjalankan script apa pun**.
+tengen dan jichi di-restart lagi lewat GNS3, lalu diperiksa **tanpa menjalankan script apa pun**:
 
 Di **tengen**:
 ```bash
@@ -1721,14 +1709,7 @@ iptables -t nat -L POSTROUTING -n
 ps aux | grep [d]hcrelay
 ```
 
-##### Bukti (setelah restart kedua) :
-tengen :
-![](assets/soal10-tengen4.png)
-
-jichi :
-![](assets/soal10-jichi4.png)
-
-Hasil:
+Hasil pengamatan setelah restart kedua:
 
 | Item | tengen | jichi |
 |---|---|---|
@@ -1739,7 +1720,7 @@ Hasil:
 | Service | `dhcpd is running` (`/usr/sbin/dhcpd -4 -q -cf /etc/dhcp/dhcpd.conf eth0`) | `/usr/sbin/dhcrelay -q -i eth2 -i eth3 -i eth4 10.90.4.10` berjalan |
 | Waktu mulai proses | PID 87, mulai 06:55 | PID 94, mulai 06:55 |
 
-IP, NAT, forwarding, dan kedua service hidup sendiri setelah restart tanpa campur tangan manual. PID yang kecil dengan waktu mulai yang baru menunjukkan kedua proses lahir dari proses boot, bukan sisa sesi sebelumnya.
+IP, NAT, forwarding, dan kedua service hidup sendiri setelah restart tanpa campur tangan manual. PID yang kecil dengan waktu mulai yang baru menunjukkan kedua proses lahir dari proses boot, bukan sisa sesi sebelumnya. Keberhasilan ini juga terlihat dari kedelapan client pada bagian berikut yang langsung memperoleh lease lewat relay dan dapat mengakses internet lewat NAT.
 
 ---
 
@@ -1826,7 +1807,7 @@ awk '/^lease/{ip=$2} /^  binding state/{st[ip]=$3} /hardware ethernet/{mac[ip]=$
 
 ##### Bukti :
 tengen :
-![](assets/soal10-tengen5.png)
+![](assets/soal10-tengen.png)
 
 Hasil pada tengen (konfigurasi tetap utuh setelah restart):
 
@@ -1834,7 +1815,7 @@ Hasil pada tengen (konfigurasi tetap utuh setelah restart):
 |---|---|
 | Pool 1 (10.90.2.10 - 10.90.2.35) | itadori `10.90.2.10` dan fushiguro `10.90.2.11` berstatus `active` |
 | Pool 2 (10.90.2.70 - 10.90.2.95) | zenin `10.90.2.70` dan okkotsu `10.90.2.71` berstatus `active` |
-| Short lease (10.90.3.10 - 10.90.3.89, 1800 detik) | Kelas `short` berisi MAC ino dan kusakabe, `default-lease-time 1800`, `max-lease-time 1800`. ino `10.90.3.10` dan kusakabe `10.90.3.11` berstatus `active` |
+| Short lease (10.90.3.10 - 10.90.3.89, 1800 detik) | Pool short `10.90.3.10 - 10.90.3.89` hanya untuk anggota kelas `short` dengan `default-lease-time 1800` dan `max-lease-time 1800` (MAC ino dan kusakabe). ino `10.90.3.10` dan kusakabe `10.90.3.11` berstatus `active` |
 | Long lease (10.90.3.100 - 10.90.3.199, 43200 detik) | Kelas `long` berisi MAC miwa, `default-lease-time 43200`, `max-lease-time 43200`. miwa `10.90.3.100` berstatus `active` |
 | Fixed address | `host kugisaki` dengan MAC `02:42:59:c7:e6:00` dan `fixed-address 10.90.3.99`. kugisaki memperoleh `10.90.3.99` |
 
