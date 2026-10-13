@@ -1542,3 +1542,316 @@ itadori kembali memperoleh alamat dari pool yang benar (Pool 1) dengan gateway s
 > Jika jichi di-stop lalu di-start lagi, konfigurasi IP hilang dan relay tidak berjalan. Jalankan ulang `bash /root/jichi.sh`, lalu `bash /root/jichi-relay.sh`.
 
 ---
+
+### Soal 10 : Autostart DHCP Server (tengen) dan DHCP Relay (jichi), Restart Node, dan Verifikasi
+
+Setelah gangguan Shibuya tertangani, pemulihan harus **bertahan setelah restart**. Pada soal ini autostart diaktifkan untuk **DHCP Server** di **tengen** dan **DHCP Relay** di **jichi**, kedua node di-restart, lalu diverifikasi status layanan, IP, gateway, lease, dan konektivitas client Network 2 dan 3. Kebijakan Pool 1, Pool 2, short lease, long lease, dan fixed address harus tetap berlaku.
+
+#### Gambaran pengerjaan
+
+| Tahap | Tindakan | Hasil |
+|---|---|---|
+| 1 | Aktifkan autostart dengan `update-rc.d` dan restart tengen serta jichi | Paket dan konfigurasi selamat, tetapi IP dan service **tidak** hidup sendiri |
+| 2 | Telusuri penyebab dan pasang konfigurasi boot lewat `/etc/network/interfaces` | IP, NAT, forwarding, dan kedua service dijalankan saat interface naik |
+| 3 | Restart tengen dan jichi tanpa menjalankan script apa pun | Semua pulih otomatis |
+| 4 | Verifikasi client Network 2 dan 3 serta lease di tengen | Seluruh kebijakan tetap berlaku |
+
+---
+
+#### 1. Aktifkan autostart dan restart (percobaan pertama)
+
+Di **tengen**:
+```bash
+update-rc.d isc-dhcp-server defaults
+update-rc.d isc-dhcp-server enable
+ls /etc/rc2.d/ | grep dhcp
+grep INTERFACES /etc/default/isc-dhcp-server
+ls /root/*.sh
+```
+Di **jichi**:
+```bash
+update-rc.d isc-dhcp-relay defaults
+update-rc.d isc-dhcp-relay enable
+ls /etc/rc2.d/ | grep dhcp
+cat /etc/default/isc-dhcp-relay
+ls /root/*.sh
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `update-rc.d <service> defaults` | Membuat link autostart (`S01...`) pada runlevel standar di `/etc/rc2.d` |
+| `update-rc.d <service> enable` | Memastikan service ditandai aktif |
+| `ls /etc/rc2.d/ \| grep dhcp` | Memeriksa link autostart: `S01isc-dhcp-server` di tengen dan `S01isc-dhcp-relay` di jichi |
+| `grep INTERFACES` dan `cat /etc/default/isc-dhcp-relay` | Memastikan `INTERFACESv4="eth0"` di tengen, serta `SERVERS="10.90.4.10"` dan `INTERFACES="eth2 eth3 eth4"` di jichi |
+
+##### Bukti (sebelum restart) :
+tengen :
+![](assets/soal10-tengen.png)
+
+jichi :
+![](assets/soal10-jichi.png)
+
+Setelah itu tengen dan jichi di-restart lewat GNS3 (klik kanan node, **Stop**, lalu **Start**), dan kondisinya diperiksa **tanpa** menjalankan script apa pun:
+```bash
+ip -br addr
+ip route
+which dhcpd              # di tengen (di jichi: which dhcrelay)
+ls /etc/dhcp             # di tengen
+ps aux | grep [d]hcpd    # di jichi: ps aux | grep [d]hcrelay
+service isc-dhcp-server status   # di jichi: service isc-dhcp-relay status
+ls /root/*.sh
+```
+
+##### Bukti (setelah restart pertama) :
+tengen :
+![](assets/soal10-tengen2.png)
+
+jichi :
+![](assets/soal10-jichi2.png)
+
+Hasil setelah restart pertama:
+
+| Item | tengen | jichi |
+|---|---|---|
+| IP dan route | Hilang (hanya alamat link-local) | Hilang, aturan NAT `MASQUERADE` juga kosong |
+| Paket | Ada (`/usr/sbin/dhcpd`) | Ada (`/usr/sbin/dhcrelay`) |
+| Konfigurasi | Ada (`dhcpd.conf`, `net2.conf`, `net3.conf`, `net3-static.conf`) | Ada (`/etc/default/isc-dhcp-relay`) |
+| Link `S01...` di `/etc/rc2.d` | Ada | Ada |
+| Service | **Tidak berjalan** (`not running but /var/run/dhcpd.pid exists`) | **Tidak berjalan** (tidak ada proses `dhcrelay`) |
+| Script di `/root` | Ada | Ada |
+
+Kesimpulan percobaan pertama: paket, konfigurasi, dan script **selamat** setelah restart, tetapi IP, NAT, dan service **tidak otomatis hidup**, meskipun link `S01...` sudah ada. Pada node ini proses pertama (PID 1) adalah `dumb-init` dan bukan init system penuh, sehingga link di `/etc/rc2.d` tidak cukup untuk memicu service saat boot.
+
+---
+
+#### 2. Konfigurasi boot lewat `/etc/network/interfaces`
+
+Berkas `/etc/network/interfaces` pada kedua node awalnya hanya berisi template yang seluruhnya dikomentari. Berkas ini memakai pola `up <perintah>`, yaitu perintah yang dijalankan otomatis setiap interface naik. Pola ini dipakai untuk menerapkan IP statis sekaligus menjalankan perintah yang sebelumnya manual.
+
+Di **tengen**:
+```bash
+cp /etc/network/interfaces /root/interfaces.bak
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet static
+    address 10.90.4.10
+    netmask 255.255.255.0
+    gateway 10.90.4.1
+    up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+    up (rm -f /var/run/dhcpd.pid; service isc-dhcp-server start) || true
+EOF
+```
+Di **jichi**:
+```bash
+cp /etc/network/interfaces /root/interfaces.bak
+cat > /etc/network/interfaces << 'EOF'
+auto eth0
+iface eth0 inet static
+    address 192.168.122.153
+    netmask 255.255.255.0
+    gateway 192.168.122.1
+    up echo "nameserver 192.168.122.1" > /etc/resolv.conf
+    up sysctl -w net.ipv4.ip_forward=1 || true
+    up (iptables -t nat -F POSTROUTING; iptables -t nat -A POSTROUTING -o eth0 -s 10.90.0.0/16 -j MASQUERADE) || true
+
+auto eth1
+iface eth1 inet static
+    address 10.90.1.1
+    netmask 255.255.255.0
+
+auto eth2
+iface eth2 inet static
+    address 10.90.2.1
+    netmask 255.255.255.0
+
+auto eth3
+iface eth3 inet static
+    address 10.90.3.1
+    netmask 255.255.255.0
+
+auto eth4
+iface eth4 inet static
+    address 10.90.4.1
+    netmask 255.255.255.0
+    up (service isc-dhcp-relay start) || true
+EOF
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `auto ethX` dan `iface ethX inet static` | Interface dinaikkan otomatis saat boot dengan IP statis sesuai rancangan (Soal 1) |
+| `up echo "nameserver 192.168.122.1" > /etc/resolv.conf` | Resolver sementara untuk akses internet |
+| `up sysctl -w net.ipv4.ip_forward=1` (jichi) | Mengaktifkan IPv4 forwarding saat boot |
+| `up (iptables ... MASQUERADE)` (jichi) | Memasang kembali source NAT saat boot |
+| `up (rm -f /var/run/dhcpd.pid; service isc-dhcp-server start)` (tengen) | Membuang pid file basi lalu menjalankan DHCP server setelah eth0 punya IP |
+| `up (service isc-dhcp-relay start)` pada `eth4` (jichi) | Menjalankan relay terakhir, setelah eth2, eth3, dan eth4 sudah naik |
+| `\|\| true` | Kegagalan satu perintah tidak membatalkan proses naiknya interface |
+| `/root/interfaces.bak` | Cadangan template asli. Kembalikan dengan `cp /root/interfaces.bak /etc/network/interfaces` bila perlu |
+
+##### Bukti :
+tengen :
+![](assets/soal10-tengen3.png)
+
+jichi :
+![](assets/soal10-jichi3.png)
+
+---
+
+#### 3. Restart kedua dan verifikasi layanan
+
+tengen dan jichi di-restart lagi lewat GNS3, lalu diperiksa **tanpa menjalankan script apa pun**.
+
+Di **tengen**:
+```bash
+ip -br addr
+ip route
+ps aux | grep [d]hcpd
+service isc-dhcp-server status
+```
+Di **jichi**:
+```bash
+ip -br addr
+ip route
+sysctl net.ipv4.ip_forward
+iptables -t nat -L POSTROUTING -n
+ps aux | grep [d]hcrelay
+```
+
+##### Bukti (setelah restart kedua) :
+tengen :
+![](assets/soal10-tengen4.png)
+
+jichi :
+![](assets/soal10-jichi4.png)
+
+Hasil:
+
+| Item | tengen | jichi |
+|---|---|---|
+| IP | `eth0` 10.90.4.10/24 | `eth0` 192.168.122.153/24, `eth1` - `eth4` 10.90.1.1 - 10.90.4.1 (/24) |
+| Default route | via 10.90.4.1 | via 192.168.122.1 |
+| IPv4 forwarding | - | `net.ipv4.ip_forward = 1` |
+| NAT | - | `MASQUERADE` untuk `10.90.0.0/16` |
+| Service | `dhcpd is running` (`/usr/sbin/dhcpd -4 -q -cf /etc/dhcp/dhcpd.conf eth0`) | `/usr/sbin/dhcrelay -q -i eth2 -i eth3 -i eth4 10.90.4.10` berjalan |
+| Waktu mulai proses | PID 87, mulai 06:55 | PID 94, mulai 06:55 |
+
+IP, NAT, forwarding, dan kedua service hidup sendiri setelah restart tanpa campur tangan manual. PID yang kecil dengan waktu mulai yang baru menunjukkan kedua proses lahir dari proses boot, bukan sisa sesi sebelumnya.
+
+---
+
+#### 4. Verifikasi client Network 2 dan 3
+
+Jalankan di kedelapan client (itadori, fushiguro, zenin, okkotsu, ino, kusakabe, miwa, kugisaki):
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+ip route
+cat /etc/resolv.conf
+ping -c 3 10.90.4.10
+ping -c 3 8.8.8.8
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `udhcpc -i eth0` | Meminta lease baru lewat relay jichi menuju tengen |
+| `ip -br addr`, `ip route`, `cat /etc/resolv.conf` | Memeriksa IP, gateway, dan DNS |
+| `ping -c 3 10.90.4.10` | Menguji jalur ke tengen lewat jichi (TTL 63 = satu router) |
+| `ping -c 3 8.8.8.8` | Menguji NAT di jichi setelah restart (TTL 111 menandakan paket kembali dari internet) |
+
+##### Bukti :
+**Divisi A (Network 2)**
+
+itadori :
+![](assets/soal10-itadori.png)
+
+fushiguro :
+![](assets/soal10-fushiguro.png)
+
+zenin :
+![](assets/soal10-zenin.png)
+
+okkotsu :
+![](assets/soal10-okkotsu.png)
+
+**Divisi B (Network 3)**
+
+ino :
+![](assets/soal10-ino.png)
+
+kusakabe :
+![](assets/soal10-kusakabe.png)
+
+miwa :
+![](assets/soal10-miwa.png)
+
+kugisaki :
+![](assets/soal10-kugisaki.png)
+
+Ringkasan hasil:
+
+| Client | Pool / kelas | IP | Gateway | Lease time | Ping tengen | Ping 8.8.8.8 |
+|---|---|---|---|---|---|---|
+| itadori | Pool 1 | 10.90.2.10 | 10.90.2.1 | 600 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| fushiguro | Pool 1 | 10.90.2.11 | 10.90.2.1 | 554 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| zenin | Pool 2 | 10.90.2.70 | 10.90.2.1 | 542 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| okkotsu | Pool 2 | 10.90.2.71 | 10.90.2.1 | 528 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| ino | short | 10.90.3.10 | 10.90.3.1 | 1704 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| kusakabe | short | 10.90.3.11 | 10.90.3.1 | 1800 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| miwa | long | 10.90.3.100 | 10.90.3.1 | 39808 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+| kugisaki | fixed address | 10.90.3.99 | 10.90.3.1 | 600 | 0% loss, TTL 63 | 0% loss, TTL 111 |
+
+DNS di semua client: `10.90.1.2` dan `10.90.1.3`.
+
+> Beberapa lease time lebih kecil dari batasnya (misalnya 554, 542, 528, 1704, dan 39808) karena client masih memegang lease sebelumnya yang belum habis, sehingga yang dilaporkan adalah **sisa** waktu lease. Batas kebijakan tetap 600 detik untuk Network 2 dan kugisaki, 1800 detik untuk short lease, dan 43200 detik untuk long lease.
+
+---
+
+#### 5. Verifikasi kebijakan di tengen
+
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+cat /etc/dhcp/net2.conf /etc/dhcp/net3.conf /etc/dhcp/net3-static.conf
+awk '/^lease/{ip=$2} /^  binding state/{st[ip]=$3} /hardware ethernet/{mac[ip]=$3} /^  ends/{e[ip]=$3" "$4} END{for(i in mac) print i, mac[i], st[i], e[i]}' /var/lib/dhcp/dhcpd.leases | sort -V
+```
+
+##### Bukti :
+tengen :
+![](assets/soal10-tengen5.png)
+
+Hasil pada tengen (konfigurasi tetap utuh setelah restart):
+
+| Kebijakan | Bukti |
+|---|---|
+| Pool 1 (10.90.2.10 - 10.90.2.35) | itadori `10.90.2.10` dan fushiguro `10.90.2.11` berstatus `active` |
+| Pool 2 (10.90.2.70 - 10.90.2.95) | zenin `10.90.2.70` dan okkotsu `10.90.2.71` berstatus `active` |
+| Short lease (10.90.3.10 - 10.90.3.89, 1800 detik) | Kelas `short` berisi MAC ino dan kusakabe, `default-lease-time 1800`, `max-lease-time 1800`. ino `10.90.3.10` dan kusakabe `10.90.3.11` berstatus `active` |
+| Long lease (10.90.3.100 - 10.90.3.199, 43200 detik) | Kelas `long` berisi MAC miwa, `default-lease-time 43200`, `max-lease-time 43200`. miwa `10.90.3.100` berstatus `active` |
+| Fixed address | `host kugisaki` dengan MAC `02:42:59:c7:e6:00` dan `fixed-address 10.90.3.99`. kugisaki memperoleh `10.90.3.99` |
+
+> kugisaki tidak muncul pada ringkasan `dhcpd.leases` karena host dengan `fixed-address` biasanya tidak dicatat sebagai lease dinamis. Buktinya ada pada blok `host kugisaki` di sisi server dan alamat yang diterima di sisi client.
+
+---
+
+#### Ringkasan
+
+| Yang diminta | Hasil |
+|---|---|
+| Autostart DHCP Server (tengen) | Aktif. Link `S01isc-dhcp-server` dibuat dan service dijalankan saat boot lewat `/etc/network/interfaces` |
+| Autostart DHCP Relay (jichi) | Aktif. Link `S01isc-dhcp-relay` dibuat dan service dijalankan saat boot lewat `/etc/network/interfaces` |
+| Restart kedua node | IP, NAT, forwarding, dan kedua service pulih otomatis |
+| Status layanan, IP, gateway, lease, konektivitas client | Terverifikasi pada kedelapan client |
+| Kebijakan Pool 1, Pool 2, short lease, long lease, fixed address | Tetap berlaku setelah restart |
+
+> Pada node ini link `S01...` di `/etc/rc2.d` saja tidak cukup memulai service saat boot (terbukti pada restart pertama), sehingga pemicunya dipasang di `/etc/network/interfaces`. Jika `interfaces` perlu dikembalikan ke template asli, pakai `/root/interfaces.bak` di masing-masing node.
+
+---
