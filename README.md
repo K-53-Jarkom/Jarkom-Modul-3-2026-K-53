@@ -1273,3 +1273,125 @@ Pemeriksaan kebijakan:
 > Jika node di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang script pemulihan sesuai urutan: `bash /root/jichi.sh`, `bash /root/tengen.sh`, `bash /root/tengen-dhcp.sh`, `bash /root/tengen-net2.sh`, `bash /root/tengen-net3.sh`, `bash /root/tengen-kugisaki.sh`, lalu `bash /root/jichi-relay.sh`.
 
 ---
+
+### Soal 8 : Packet Capture Proses DHCP (tcpdump di tengen)
+
+Sebelum Curtain dibuka kembali, pada soal ini dibuktikan bahwa proses pemberian alamat berjalan sesuai protokol DHCP. Dilakukan packet capture dengan **tcpdump** di **tengen** saat client Network 2 (itadori) dan client Network 3 (ino) meminta lease baru. Dari capture ditunjukkan urutan **DISCOVER → OFFER → REQUEST → ACK**, beserta alamat server, alamat yang diberikan, lease time, dan field **giaddr**.
+
+#### Persiapan
+
+Pasang tcpdump di tengen:
+```bash
+apt update; apt install -y tcpdump
+tcpdump --version
+```
+
+> Dengan jalur relay, paket dari client tidak sampai ke tengen sebagai broadcast. jichi meneruskannya secara unicast dari `10.90.4.1` ke `10.90.4.10`, dan mengisi field **giaddr** dengan alamat interface jichi yang menerima request dari client.
+
+---
+
+#### 1. Capture Network 2 (itadori)
+
+Buka dua konsol. Di **tengen** jalankan capture lebih dulu (berhenti sendiri setelah 4 paket):
+```bash
+tcpdump -i eth0 -n -vvv -c 4 'udp and (port 67 or port 68)'
+```
+Setelah tengen menunggu, di **itadori** minta lease baru:
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+```
+
+Penjelasan opsi tcpdump:
+
+| Opsi | Fungsi |
+|---|---|
+| `-i eth0` | Capture di interface tengen yang berada di Network 4 |
+| `-n` | Tidak me-resolve nama, alamat IP tampil apa adanya |
+| `-vvv` | Menampilkan detail BOOTP/DHCP: `Gateway-IP` (giaddr), `Your-IP`, `Server-ID`, `Lease-Time` |
+| `-c 4` | Berhenti setelah 4 paket (DISCOVER, OFFER, REQUEST, ACK) |
+| `'udp and (port 67 or port 68)'` | Hanya lalu lintas DHCP |
+
+##### Bukti :
+tengen (DISCOVER dan OFFER) :
+![](assets/soal8-tengen.png)
+
+tengen (REQUEST dan ACK, serta ringkasan `4 packets captured`) :
+![](assets/soal8-tengen2.png)
+
+itadori (hasil `udhcpc`) :
+![](assets/soal8-itadori.png)
+
+Urutan paket pada capture Network 2 (`xid 0x90597e70`, client MAC `02:42:9e:05:11:00`):
+
+| No | Waktu | Arah | Tipe pesan (opsi 53) | Isi penting |
+|---|---|---|---|---|
+| 1 | 06:21:30.206205 | 10.90.4.1 → 10.90.4.10 | **Discover** | `Gateway-IP 10.90.2.1`, hops 1, Client-ID `02:42:9e:05:11:00` |
+| 2 | 06:21:30.206334 | 10.90.4.10 → 10.90.2.1 | **Offer** | `Your-IP 10.90.2.10`, `Server-ID 10.90.4.10`, `Lease-Time 571`, mask `255.255.255.0`, gateway `10.90.2.1`, DNS `10.90.1.2,10.90.1.3`, broadcast `10.90.2.255` |
+| 3 | 06:21:30.216215 | 10.90.4.1 → 10.90.4.10 | **Request** | `Requested-IP 10.90.2.10`, `Server-ID 10.90.4.10`, `Gateway-IP 10.90.2.1` |
+| 4 | 06:21:30.216330 | 10.90.4.10 → 10.90.2.1 | **ACK** | `Your-IP 10.90.2.10`, `Server-ID 10.90.4.10`, `Lease-Time 571` |
+
+Keempat paket memakai `xid` yang sama, sehingga terbukti merupakan satu transaksi DHCP.
+
+---
+
+#### 2. Capture Network 3 (ino)
+
+Ulangi dengan cara yang sama. Di **tengen**:
+```bash
+tcpdump -i eth0 -n -vvv -c 4 'udp and (port 67 or port 68)'
+```
+Lalu di **ino**:
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip -br addr
+```
+
+##### Bukti :
+tengen (DISCOVER, OFFER, dan awal REQUEST) :
+![](assets/soal8-tengen3.png)
+
+tengen (REQUEST dan ACK, serta ringkasan `4 packets captured`) :
+![](assets/soal8-tengen4.png)
+
+ino (hasil `udhcpc`) :
+![](assets/soal8-ino.png)
+
+Urutan paket pada capture Network 3 (`xid 0xe7c2201a`, client MAC `02:42:c9:06:06:00`):
+
+| No | Waktu | Arah | Tipe pesan (opsi 53) | Isi penting |
+|---|---|---|---|---|
+| 1 | 06:21:49.692263 | 10.90.4.1 → 10.90.4.10 | **Discover** | `Gateway-IP 10.90.3.1`, hops 1, Client-ID `02:42:c9:06:06:00` |
+| 2 | 06:21:49.692465 | 10.90.4.10 → 10.90.3.1 | **Offer** | `Your-IP 10.90.3.10`, `Server-ID 10.90.4.10`, `Lease-Time 1533`, mask `255.255.255.0`, gateway `10.90.3.1`, DNS `10.90.1.2,10.90.1.3`, broadcast `10.90.3.255` |
+| 3 | 06:21:49.702365 | 10.90.4.1 → 10.90.4.10 | **Request** | `Requested-IP 10.90.3.10`, `Server-ID 10.90.4.10`, `Gateway-IP 10.90.3.1` |
+| 4 | 06:21:49.702563 | 10.90.4.10 → 10.90.3.1 | **ACK** | `Your-IP 10.90.3.10`, `Server-ID 10.90.4.10`, `Lease-Time 1533` |
+
+---
+
+#### 3. Identifikasi hasil capture
+
+| Informasi | Network 2 (itadori) | Network 3 (ino) |
+|---|---|---|
+| Alamat server DHCP (`Server-ID`) | 10.90.4.10 (tengen) | 10.90.4.10 (tengen) |
+| Alamat yang diberikan (`Your-IP`) | 10.90.2.10 | 10.90.3.10 |
+| Lease time | 571 detik | 1533 detik |
+| `giaddr` (`Gateway-IP`) | 10.90.2.1 | 10.90.3.1 |
+| Interface jichi yang menerima request | eth2 (10.90.2.1) | eth3 (10.90.3.1) |
+| Sumber paket yang sampai ke tengen | 10.90.4.1 (eth4 jichi) | 10.90.4.1 (eth4 jichi) |
+| Tujuan balasan dari tengen | 10.90.2.1 (giaddr) | 10.90.3.1 (giaddr) |
+
+Kesimpulan:
+- **Urutan protokol benar.** Pada kedua capture muncul empat pesan berurutan: Discover, Offer, Request, ACK, dengan `xid` yang konsisten dalam satu transaksi.
+- **giaddr sesuai interface jichi.** Request dari Network 2 membawa `giaddr 10.90.2.1` (alamat eth2 jichi), dan request dari Network 3 membawa `giaddr 10.90.3.1` (alamat eth3 jichi). Berdasarkan `giaddr` inilah tengen memilih scope yang cocok (`net2.conf` atau `net3.conf`) dan mengirim balasan unicast kembali ke alamat relay tersebut.
+- **Relay bekerja.** Semua paket yang sampai ke tengen berasal dari `10.90.4.1` dan memiliki `hops 1`, yang menandakan paket telah diteruskan satu kali oleh relay di jichi.
+- **Alamat sesuai kebijakan.** itadori memperoleh `10.90.2.10` dari Pool 1, dan ino memperoleh `10.90.3.10` dari pool short lease. Opsi gateway, DNS, mask, dan broadcast pada Offer dan ACK sesuai dengan masing-masing network.
+
+> Lease time pada capture adalah 571 dan 1533, bukan 600 dan 1800. Ini karena kedua client masih memegang lease yang sebelumnya dibuat dan belum habis, sehingga yang ditawarkan adalah **sisa** waktu lease tersebut. Batas lease dari kebijakan server tetap 600 detik (Pool 1 / Network 2) dan 1800 detik (short lease / Network 3), sesuai Soal 4 dan Soal 5.
+
+---
