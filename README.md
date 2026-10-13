@@ -1102,3 +1102,176 @@ Alamat `10.90.3.99` sesuai dengan reservasi `fixed-address` pada `net3-static.co
 > Jika tengen di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang `bash /root/tengen.sh` (Soal 1), `bash /root/tengen-dhcp.sh` (Soal 2), `bash /root/tengen-net2.sh` (Soal 4), `bash /root/tengen-net3.sh` (Soal 5), lalu `bash /root/tengen-kugisaki.sh` (Soal 6).
 
 ---
+
+### Soal 7 : Verifikasi Konfigurasi Client Divisi A dan Divisi B
+
+Setelah seluruh aturan alokasi diterapkan (Soal 2 - 6), pada soal ini dibuktikan bahwa **setiap client** menerima konfigurasi jaringan sesuai wilayahnya: subnet mask `/24`, gateway dan broadcast yang benar, DNS `10.90.1.2` dan `10.90.1.3`, serta domain-search `K53.com`. Setelah itu lease dicocokkan dengan `/var/lib/dhcp/dhcpd.leases` di tengen untuk memastikan tidak ada alamat yang bertabrakan atau berada di luar kebijakan pool.
+
+#### Yang diverifikasi
+
+| Aspek | Nilai yang diharapkan |
+|---|---|
+| Subnet mask | 255.255.255.0 (/24) |
+| Gateway Network 2 | 10.90.2.1 |
+| Gateway Network 3 | 10.90.3.1 |
+| Broadcast Network 2 | 10.90.2.255 |
+| Broadcast Network 3 | 10.90.3.255 |
+| DNS | 10.90.1.2 dan 10.90.1.3 |
+| Domain-search | K53.com |
+
+> Verifikasi dikerjakan di delapan client (Divisi A: itadori, fushiguro, zenin, okkotsu. Divisi B: ino, kusakabe, miwa, kugisaki) dan di tengen.
+
+---
+
+#### 1. Client meminta lease baru dan memeriksa konfigurasi
+
+Jalankan di kedelapan client:
+```bash
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+ip addr show eth0 | grep -E "inet |brd"
+ip route
+cat /etc/resolv.conf
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `killall udhcpc` | Menghentikan klien DHCP lama supaya tidak bentrok |
+| `ip addr flush dev eth0` | Membuang IP lama sehingga permintaan benar-benar dari awal |
+| `udhcpc -i eth0` | Meminta lease baru lewat relay jichi menuju tengen |
+| `ip addr show eth0 \| grep -E "inet \|brd"` | Menampilkan IP beserta prefix (`/24`) dan broadcast (`brd`) |
+| `ip route` | Memeriksa default gateway dan route jaringan lokal |
+| `cat /etc/resolv.conf` | Memeriksa DNS yang diterima |
+
+##### Bukti :
+**Divisi A (Network 2)**
+
+itadori :
+![](assets/soal7-itadori.png)
+
+fushiguro :
+![](assets/soal7-fushiguro.png)
+
+zenin :
+![](assets/soal7-zenin.png)
+
+okkotsu :
+![](assets/soal7-okkotsu.png)
+
+**Divisi B (Network 3)**
+
+ino :
+![](assets/soal7-ino.png)
+
+kusakabe :
+![](assets/soal7-kusakabe.png)
+
+miwa :
+![](assets/soal7-miwa.png)
+
+kugisaki :
+![](assets/soal7-kugisaki.png)
+
+Ringkasan hasil:
+
+| Client | Pool / kelas | IP | Mask | Gateway | Broadcast | Lease time | DNS |
+|---|---|---|---|---|---|---|---|
+| itadori | Pool 1 | 10.90.2.10 | /24 | 10.90.2.1 | 10.90.2.255 | 600 | 10.90.1.2, 10.90.1.3 |
+| fushiguro | Pool 1 | 10.90.2.11 | /24 | 10.90.2.1 | 10.90.2.255 | 600 | 10.90.1.2, 10.90.1.3 |
+| zenin | Pool 2 | 10.90.2.70 | /24 | 10.90.2.1 | 10.90.2.255 | 600 | 10.90.1.2, 10.90.1.3 |
+| okkotsu | Pool 2 | 10.90.2.71 | /24 | 10.90.2.1 | 10.90.2.255 | 600 | 10.90.1.2, 10.90.1.3 |
+| ino | short | 10.90.3.10 | /24 | 10.90.3.1 | 10.90.3.255 | 1800 | 10.90.1.2, 10.90.1.3 |
+| kusakabe | short | 10.90.3.11 | /24 | 10.90.3.1 | 10.90.3.255 | 1800 | 10.90.1.2, 10.90.1.3 |
+| miwa | long | 10.90.3.100 | /24 | 10.90.3.1 | 10.90.3.255 | 43200 | 10.90.1.2, 10.90.1.3 |
+| kugisaki | fixed address | 10.90.3.99 | /24 | 10.90.3.1 | 10.90.3.255 | 600 | 10.90.1.2, 10.90.1.3 |
+
+Seluruh client memperoleh server DHCP `10.90.4.10` (tengen) lewat relay di jichi. Route yang terbentuk pada tiap client adalah `default via <gateway> dev eth0` ditambah route jaringan lokal `/24` dengan `src` sesuai IP client.
+
+---
+
+#### 2. Pembuktian domain-search
+
+Pada `resolv.conf` client hanya muncul baris `nameserver`, tanpa baris `search`. Ini karena script bawaan `udhcpc` pada image client hanya menulis DNS ke `resolv.conf` dan tidak memproses opsi domain-search. Agar terbukti bahwa opsi tersebut sampai ke client, nilai opsi yang diterima `udhcpc` ditampilkan dengan script sementara. Jalankan di satu client per network (itadori dan ino):
+```bash
+cat > /tmp/dump.sh << 'EOF'
+#!/bin/sh
+env | grep -E "^(ip|subnet|router|broadcast|dns|domain|search)="
+EOF
+chmod +x /tmp/dump.sh
+udhcpc -i eth0 -n -q -O search -s /tmp/dump.sh
+```
+
+Penjelasan:
+
+| Bagian | Fungsi |
+|---|---|
+| `-O search` | Meminta opsi domain-search (opsi 119) dari server |
+| `-n -q` | Berhenti setelah satu kali memperoleh lease |
+| `-s /tmp/dump.sh` | Menjalankan script sementara yang hanya menampilkan opsi yang diterima. Script ini tidak mengubah IP client |
+
+##### Bukti :
+itadori (Network 2) : opsi yang diterima `subnet=255.255.255.0`, `router=10.90.2.1`, `search=K53.com`, `dns=10.90.1.2 10.90.1.3`, `broadcast=10.90.2.255`, `ip=10.90.2.10`.
+![](assets/soal7-itadori2.png)
+
+ino (Network 3) : opsi yang diterima `subnet=255.255.255.0`, `router=10.90.3.1`, `search=K53.com`, `dns=10.90.1.2 10.90.1.3`, `broadcast=10.90.3.255`, `ip=10.90.3.10`.
+![](assets/soal7-ino2.png)
+
+> Pada ino, lease time yang dilaporkan `udhcpc` pada permintaan ini adalah 1599, bukan 1800. Itu karena ino masih memegang lease yang baru dibuat, sehingga yang dilaporkan adalah **sisa** waktu lease yang berjalan. Batas yang diberikan server tetap 1800 detik (lihat permintaan sebelumnya yang menampilkan lease time 1800).
+
+---
+
+#### 3. Mencocokkan lease di tengen
+
+Jalankan di tengen:
+```bash
+dhcpd -t -cf /etc/dhcp/dhcpd.conf
+service isc-dhcp-server status
+cat /etc/dhcp/net2.conf /etc/dhcp/net3.conf /etc/dhcp/net3-static.conf
+awk '/^lease/{ip=$2} /^  binding state/{st[ip]=$3} /hardware ethernet/{mac[ip]=$3} /^  ends/{e[ip]=$3" "$4} END{for(i in mac) print i, mac[i], st[i], e[i]}' /var/lib/dhcp/dhcpd.leases | sort -V
+```
+
+Penjelasan:
+
+| Perintah | Fungsi |
+|---|---|
+| `dhcpd -t -cf ...` | Memvalidasi konfigurasi tanpa error |
+| `service isc-dhcp-server status` | Memastikan dhcpd berjalan |
+| `cat net2.conf net3.conf net3-static.conf` | Menampilkan seluruh kebijakan pool, kelas, dan reservasi |
+| `awk ... dhcpd.leases \| sort -V` | `dhcpd.leases` bersifat log yang terus bertambah (satu IP bisa muncul berkali-kali). `awk` merangkumnya menjadi satu baris per IP dengan MAC, status, dan waktu `ends` terbaru (waktu mengikuti jam server, UTC) |
+
+##### Bukti :
+tengen :
+![](assets/soal7-tengen.png)
+![](assets/soal7-tengen2.png)
+![](assets/soal7-tengen3.png)
+
+Hasil di atas sesuai harapan: validasi konfigurasi lolos tanpa error, `dhcpd is running`, dan isi tiga file konfigurasi sesuai kebijakan Soal 4, 5, dan 6.
+
+Pencocokan lease dengan client:
+
+| IP | MAC address | Client | Pool / kelas | Di dalam kebijakan? |
+|---|---|---|---|---|
+| 10.90.2.10 | `02:42:9e:05:11:00` | itadori | Pool 1 (10 - 35) | Ya |
+| 10.90.2.11 | `02:42:d6:c7:fd:00` | fushiguro | Pool 1 (10 - 35) | Ya |
+| 10.90.2.70 | `02:42:a7:06:c5:00` | zenin | Pool 2 (70 - 95) | Ya |
+| 10.90.2.71 | `02:42:1e:db:db:00` | okkotsu | Pool 2 (70 - 95) | Ya |
+| 10.90.3.10 | `02:42:c9:06:06:00` | ino | short (10 - 89) | Ya |
+| 10.90.3.11 | `02:42:33:cb:b7:00` | kusakabe | short (10 - 89) | Ya |
+| 10.90.3.100 | `02:42:46:ce:21:00` | miwa | long (100 - 199) | Ya |
+| 10.90.3.99 | `02:42:59:c7:e6:00` | kugisaki | `host kugisaki` (fixed-address) | Ya |
+
+Pemeriksaan kebijakan:
+
+| Pemeriksaan | Hasil |
+|---|---|
+| Tabrakan alamat | Tidak ada. Tujuh lease dinamis memakai tujuh IP berbeda dan tujuh MAC berbeda |
+| Alamat di luar pool | Tidak ada. Tidak satu pun IP berada di `10.90.2.36 - 10.90.2.69` maupun `10.90.3.90 - 10.90.3.98` |
+| Kugisaki | `10.90.3.99` berasal dari reservasi `fixed-address` di `net3-static.conf` dan berada di luar pool short dan long. Pada `dhcpd.leases` host dengan `fixed-address` tidak dicatat sebagai lease dinamis, sehingga kugisaki tidak muncul pada ringkasan `awk` |
+
+> Jika node di-stop lalu di-start lagi, konfigurasi IP hilang dan paket yang terpasang bisa ikut hilang. Jalankan ulang script pemulihan sesuai urutan: `bash /root/jichi.sh`, `bash /root/tengen.sh`, `bash /root/tengen-dhcp.sh`, `bash /root/tengen-net2.sh`, `bash /root/tengen-net3.sh`, `bash /root/tengen-kugisaki.sh`, lalu `bash /root/jichi-relay.sh`.
+
+---
