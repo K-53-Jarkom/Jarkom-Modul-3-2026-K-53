@@ -1836,3 +1836,1402 @@ Hasil pada tengen (konfigurasi tetap utuh setelah restart):
 > Pada node ini link `S01...` di `/etc/rc2.d` saja tidak cukup memulai service saat boot (terbukti pada restart pertama), sehingga pemicunya dipasang di `/etc/network/interfaces`. Jika `interfaces` perlu dikembalikan ke template asli, pakai `/root/interfaces.bak` di masing-masing node.
 
 ---
+
+11. 
+jalankan diutahime
+
+cat > /root/utahime-dns.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+apt-get update; apt-get install -y bind9 bind9utils bind9-doc dnsutils
+
+
+# Buat direktori untuk file zona
+mkdir -p /etc/bind/jujutsu
+
+
+# Konfigurasi zona master dan izinkan transfer ke slave (shoko)
+cat > /etc/bind/named.conf.local << 'EOT'
+zone "jujutsu.K53.com" {
+    type master;
+    file "/etc/bind/jujutsu/jujutsu.com";
+    allow-transfer { 10.90.1.3; };
+    notify yes;
+};
+EOT
+
+
+# Buat file zona dengan SOA dan NS record
+cat > /etc/bind/jujutsu/jujutsu.com << 'EOT'
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.K53.com. root.jujutsu.K53.com. (
+                     2026101401 ; Serial
+                         604800 ; Refresh
+                          86400 ; Retry
+                        2419200 ; Expire
+                         604800 ) ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.K53.com.
+@       IN      NS      shoko.jujutsu.K53.com.
+utahime IN      A       10.90.1.2
+shoko   IN      A       10.90.1.3
+EOT
+
+
+# Izinkan query dari semua network internal
+sed -i 's/listen-on-v6 { any; };/listen-on-v6 { any; };\n\tallow-query { any; };/' /etc/bind/named.conf.options
+
+
+service bind9 restart
+EOF
+
+
+bash /root/utahime-dns.sh
+  
+
+
+
+
+
+jalankan di shoko
+
+
+cat > /root/shoko-dns.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+apt-get update; apt-get install -y bind9 bind9utils bind9-doc dnsutils
+
+
+# Konfigurasi zona slave, mengambil data dari master (utahime)
+cat > /etc/bind/named.conf.local << 'EOT'
+zone "jujutsu.K53.com" {
+    type slave;
+    file "/var/cache/bind/jujutsu.com";
+    masters { 10.90.1.2; };
+};
+EOT
+
+
+# Izinkan query dari semua network internal
+sed -i 's/listen-on-v6 { any; };/listen-on-v6 { any; };\n\tallow-query { any; };/' /etc/bind/named.conf.options
+
+
+service bind9 restart
+EOF
+
+
+bash /root/shoko-dns.sh
+  
+
+
+
+kalau error ulangi diutahime dan shoko
+service named restart
+service named status
+  
+
+  
+
+
+
+
+
+* Verifikasi Sinkronisasi dan Kenaikan Nomor Serial 
+jalankan dishoko
+ls -l /var/cache/bind/
+dig @127.0.0.1 jujutsu.K53.com SOA +short
+  
+
+
+
+jalankan diutahime
+sed -i 's/2026101401/2026101402/' /etc/bind/jujutsu/jujutsu.com
+rndc reload
+  
+
+
+
+lalu cek lagi dishoko
+dig @127.0.0.1 jujutsu.K53.com SOA +short
+  
+
+
+
+* Verifikasi Query DNS dari Client 
+jalankan diitadori
+apk add bind-tools
+  
+
+# Query ke Master (utahime)
+dig @10.90.1.2 jujutsu.K53.com NS +short
+  
+
+# Query ke Slave (shoko)
+dig @10.90.1.3 jujutsu.K53.com NS +short
+  
+
+  
+
+
+
+12.
+jalankan diutahime
+
+
+cat > /root/utahime-soal12.sh << 'EOF'
+#!/bin/bash
+
+
+# 1. Update Zona Forward (tambah A record gojo dan CNAME www)
+# Serial dinaikkan menjadi 2026101403 agar shoko otomatis update
+cat > /etc/bind/jujutsu/jujutsu.com << 'EOT'
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.K53.com. root.jujutsu.K53.com. (
+                     2026101403 ; Serial
+                         604800 ; Refresh
+                          86400 ; Retry
+                        2419200 ; Expire
+                         604800 ) ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.K53.com.
+@       IN      NS      shoko.jujutsu.K53.com.
+@       IN      A       10.90.1.4
+utahime IN      A       10.90.1.2
+shoko   IN      A       10.90.1.3
+gojo    IN      A       10.90.1.4
+www     IN      CNAME   jujutsu.K53.com.
+EOT
+
+
+# 2. Tambah Zona Reverse ke named.conf.local
+cat >> /etc/bind/named.conf.local << 'EOT'
+
+
+zone "1.90.10.in-addr.arpa" {
+    type master;
+    file "/etc/bind/jujutsu/1.90.10.in-addr.arpa";
+    allow-transfer { 10.90.1.3; };
+    notify yes;
+};
+EOT
+
+
+# 3. Buat File Zona Reverse (PTR)
+cat > /etc/bind/jujutsu/1.90.10.in-addr.arpa << 'EOT'
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.K53.com. root.jujutsu.K53.com. (
+                     2026101401 ; Serial
+                         604800 ; Refresh
+                          86400 ; Retry
+                        2419200 ; Expire
+                         604800 ) ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.K53.com.
+@       IN      NS      shoko.jujutsu.K53.com.
+4       IN      PTR     jujutsu.K53.com.
+EOT
+
+
+# 4. Aktifkan DNS Forwarder
+cat > /etc/bind/named.conf.options << 'EOT'
+options {
+        directory "/var/cache/bind";
+        forwarders {
+                192.168.122.1;
+        };
+        forward only;
+        dnssec-validation auto;
+        listen-on-v6 { any; };
+        allow-query { any; };
+};
+EOT
+
+
+service named restart
+EOF
+
+
+bash /root/utahime-soal12.sh
+  
+
+  
+
+
+
+jalankan dishoko
+
+
+cat > /root/shoko-soal12.sh << 'EOF'
+#!/bin/bash
+
+
+# 1. Tambah Zona Reverse sebagai slave
+cat >> /etc/bind/named.conf.local << 'EOT'
+
+
+zone "1.90.10.in-addr.arpa" {
+    type slave;
+    file "/var/cache/bind/1.90.10.in-addr.arpa";
+    masters { 10.90.1.2; };
+};
+EOT
+
+
+# 2. Aktifkan DNS Forwarder
+cat > /etc/bind/named.conf.options << 'EOT'
+options {
+        directory "/var/cache/bind";
+        forwarders {
+                192.168.122.1;
+        };
+        forward only;
+        dnssec-validation auto;
+        listen-on-v6 { any; };
+        allow-query { any; };
+};
+EOT
+
+
+service named restart
+EOF
+
+
+bash /root/shoko-soal12.sh
+  
+
+
+
+Jalankan diitadori
+1. Cek CNAME:
+dig @10.90.1.2 www.jujutsu.K53.com +short
+2. Cek Reverse DNS (PTR):
+dig @10.90.1.2 -x 10.90.1.4 +short
+3. Cek DNS Forwarder (Internet): Karena forwarder sudah menyala, klien seharusnya bisa ping ke internet walau hanya menggunakan IP DNS lokal.
+ping -c 3 google.com
+  
+
+
+
+13. 
+jalankan diyaga
+
+
+cat > /root/yaga-db.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y mariadb-server mariadb-client
+
+
+cat > /etc/mysql/mariadb.conf.d/99-master.cnf << 'EOT'
+[mysqld]
+bind-address = 0.0.0.0
+server-id = 1
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_do_db = db_shibuya_K53
+EOT
+
+
+mkdir -p /var/log/mysql
+chown -R mysql:mysql /var/log/mysql
+service mariadb restart || service mysql restart
+
+
+mysql -u root << 'EOT'
+CREATE DATABASE IF NOT EXISTS db_shibuya_K53;
+USE db_shibuya_K53;
+
+
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    worker_name VARCHAR(50),
+    client_ip VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE USER IF NOT EXISTS 'repl'@'10.90.4.%' IDENTIFIED BY 'password123';
+GRANT REPLICATION SLAVE ON *.* TO 'repl'@'10.90.4.%';
+
+
+CREATE USER IF NOT EXISTS 'jujutsu'@'10.90.4.%' IDENTIFIED BY 'password123';
+GRANT ALL PRIVILEGES ON db_shibuya_K53.* TO 'jujutsu'@'10.90.4.%';
+
+
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'10.90.4.%' IDENTIFIED BY 'password123' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOT
+
+
+echo "=== STATUS MASTER YAGA ==="
+mysql -u root -e "SHOW MASTER STATUS\G"
+EOF
+
+
+bash /root/yaga-db.sh
+
+
+  
+
+
+
+jalankan diinumaki
+
+
+cat > /root/inumaki-db.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y mariadb-server mariadb-client
+
+
+cat > /etc/mysql/mariadb.conf.d/99-slave.cnf << 'EOT'
+[mysqld]
+bind-address = 0.0.0.0
+server-id = 2
+relay-log = /var/log/mysql/mysql-relay-bin.log
+log_bin = /var/log/mysql/mysql-bin.log
+binlog_do_db = db_shibuya_K53
+EOT
+
+
+mkdir -p /var/log/mysql
+chown -R mysql:mysql /var/log/mysql
+service mariadb restart || service mysql restart
+
+
+mysql -u root << 'EOT'
+CREATE DATABASE IF NOT EXISTS db_shibuya_K53;
+USE db_shibuya_K53;
+
+
+CREATE TABLE IF NOT EXISTS request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    worker_name VARCHAR(50),
+    client_ip VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
+CREATE USER IF NOT EXISTS 'jujutsu'@'10.90.4.%' IDENTIFIED BY 'password123';
+GRANT ALL PRIVILEGES ON db_shibuya_K53.* TO 'jujutsu'@'10.90.4.%';
+FLUSH PRIVILEGES;
+EOT
+
+
+MASTER_STATUS=$(mysql -h 10.90.4.51 -u root -ppassword123 -e "SHOW MASTER STATUS\G")
+LOG_FILE=$(echo "$MASTER_STATUS" | grep "File:" | awk '{print $2}')
+LOG_POS=$(echo "$MASTER_STATUS" | grep "Position:" | awk '{print $2}')
+
+
+echo "Menghubungkan ke Master dengan File: $LOG_FILE dan Position: $LOG_POS"
+
+
+mysql -u root << EOT
+STOP SLAVE;
+CHANGE MASTER TO
+    MASTER_HOST='10.90.4.51',
+    MASTER_USER='repl',
+    MASTER_PASSWORD='password123',
+    MASTER_LOG_FILE='$LOG_FILE',
+    MASTER_LOG_POS=$LOG_POS;
+START SLAVE;
+EOT
+
+
+sleep 2
+echo "=== STATUS SLAVE INUMAKI ==="
+mysql -u root -e "SHOW SLAVE STATUS\G" | grep -E "Slave_IO_State|Master_Host|Slave_IO_Running|Slave_SQL_Running|Last_Error"
+EOF
+
+
+bash /root/inumaki-db.sh
+
+
+
+
+  
+
+
+
+verifikasi no 13
+jalankan diyaga
+mysql -u root -D db_shibuya_K53 -e "INSERT INTO request_logs (worker_name, client_ip) VALUES ('tes_replikasi_yaga', '10.90.2.10');"
+mysql -u root -D db_shibuya_K53 -e "SELECT * FROM request_logs;"
+  
+
+jalankan diinumaki
+1. Cek apakah data dari yaga sudah otomatis masuk ke inumaki
+mysql -u root -D db_shibuya_K53 -e "SELECT * FROM request_logs;"
+2. Bukti hak akses remote dari node Network 4 menuju yaga (10.90.4.51)
+mysql -h 10.90.4.51 -u jujutsu -ppassword123 -D db_shibuya_K53 -e "SELECT * FROM request_logs;"
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+14. 
+jalankan dimaki dan panda
+
+
+cat > /root/web-worker.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y nginx php-fpm curl
+
+
+mkdir -p /var/www/jujutsu /run/php
+
+
+cat > /var/www/jujutsu/index.php << 'EOT'
+<?php
+header('Content-Type: text/plain');
+echo "Jujutsu High Web Frontend - Dilayani oleh: " . gethostname() . "\n";
+?>
+EOT
+
+
+service php8.4-fpm start || /etc/init.d/php8.4-fpm start
+
+
+PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" | head -n 1)
+[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.4-fpm.sock"
+
+
+cat > /etc/nginx/sites-available/jujutsu << EOT
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    root /var/www/jujutsu;
+    index index.php index.html;
+
+
+    allow 10.90.1.4;
+    allow 127.0.0.1;
+    deny all;
+
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$PHP_SOCK;
+    }
+}
+EOT
+
+
+ln -sf /etc/nginx/sites-available/jujutsu /etc/nginx/sites-enabled/jujutsu
+rm -f /etc/nginx/sites-enabled/default
+
+
+service php8.4-fpm restart
+nginx -t && service nginx restart
+EOF
+
+
+bash /root/web-worker.sh
+
+
+
+
+  
+
+  
+
+  
+
+
+
+jalankan dinanami, todo dan kirara
+
+
+cat > /root/api-worker.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y nginx php-fpm php-mysql curl
+
+
+mkdir -p /var/www/api /run/php
+
+
+cat > /var/www/api/index.php << 'EOT'
+<?php
+header('Content-Type: application/json');
+
+
+$worker = gethostname();
+
+
+$client_ip = $_SERVER['REMOTE_ADDR'];
+if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+    $client_ip = $_SERVER['HTTP_X_REAL_IP'];
+} elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+    $ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+    $client_ip = trim($ips[0]);
+}
+
+
+$db_status = "disconnected";
+$mysqli = @new mysqli("10.90.4.51", "jujutsu", "password123", "db_shibuya_K53");
+
+
+if (!$mysqli->connect_error) {
+    $stmt = $mysqli->prepare("INSERT INTO request_logs (worker_name, client_ip) VALUES (?, ?)");
+    if ($stmt) {
+        $stmt->bind_param("ss", $worker, $client_ip);
+        $stmt->execute();
+        $stmt->close();
+        $db_status = "logged_to_yaga";
+    }
+    $mysqli->close();
+} else {
+    $db_status = "error: " . $mysqli->connect_error;
+}
+
+
+echo json_encode([
+    "status" => "success",
+    "worker" => $worker,
+    "client_ip" => $client_ip,
+    "db_log" => $db_status
+]) . "\n";
+?>
+EOT
+
+
+service php8.4-fpm start || /etc/init.d/php8.4-fpm start
+
+
+PHP_SOCK=$(find /run/php/ -name "php*-fpm.sock" | head -n 1)
+[ -z "$PHP_SOCK" ] && PHP_SOCK="/run/php/php8.4-fpm.sock"
+
+
+cat > /etc/nginx/sites-available/api << EOT
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    root /var/www/api;
+    index index.php;
+
+
+    allow 10.90.4.20;
+    allow 127.0.0.1;
+    deny all;
+
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$PHP_SOCK;
+    }
+}
+EOT
+
+
+ln -sf /etc/nginx/sites-available/api /etc/nginx/sites-enabled/api
+rm -f /etc/nginx/sites-enabled/default
+
+
+service php8.4-fpm restart
+nginx -t && service nginx restart
+EOF
+
+
+bash /root/api-worker.sh
+
+
+
+
+  
+
+  
+
+  
+
+
+
+
+
+* Uji Lokal di Masing-Masing Worker 
+jalankan dimaki dan panda
+curl -s http://127.0.0.1 
+  
+
+  
+
+jalankan dinanami, todo, kirara
+curl -s http://127.0.0.1
+  
+
+  
+
+  
+
+* Uji Akses Langsung dari Klien Ditolak (403 Forbidden) 
+jalankan diitadori
+apk add curl 2>/dev/null
+curl -i http://10.90.4.31
+curl -i http://10.90.4.41
+
+
+kalau diitadori error 
+killall udhcpc 2>/dev/null
+ip addr flush dev eth0
+ip link set eth0 up
+udhcpc -i eth0
+  
+
+
+
+* Uji Akses Lewat Jalur Proxy Resmi Diizinkan (200 OK) 
+jalankan digojo
+apt-get update; apt-get install -y curl
+curl -i http://10.90.4.31
+curl -i http://10.90.4.32
+  
+
+jalankan digeto
+apt-get update; apt-get install -y curl
+curl -i http://10.90.4.41
+curl -i http://10.90.4.42
+curl -i http://10.90.4.43
+  
+
+
+
+
+
+15.
+jalankan digeto
+
+
+cat > /root/geto-lb.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y nginx curl
+
+
+# Konfigurasi Upstream API Cluster dengan Weighted Round Robin (nanami weight=3, todo weight=1)
+cat > /etc/nginx/sites-available/load-balancer << 'EOT'
+upstream api_cluster {
+    server 10.90.4.41 weight=3;
+    server 10.90.4.42 weight=1;
+}
+
+
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOT
+
+
+ln -sf /etc/nginx/sites-available/load-balancer /etc/nginx/sites-enabled/load-balancer
+rm -f /etc/nginx/sites-enabled/default
+
+
+nginx -t && service nginx restart
+EOF
+
+
+bash /root/geto-lb.sh
+  
+
+cek digeto juga
+for i in {1..8}; do curl -s http://10.90.4.20 | grep "worker"; done
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+16. 
+
+
+jalankan di gojo
+
+
+cat > /root/gojo-proxy.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y nginx curl
+
+
+# Konfigurasi Reverse Proxy & Load Balancer Utama pada gojo
+cat > /etc/nginx/sites-available/gojo-proxy << 'EOT'
+upstream web_cluster {
+    server 10.90.4.31;
+    server 10.90.4.32;
+}
+
+
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    # Arahkan trafik berawalan /api/ ke Internal Load Balancer geto (10.90.4.20)
+    location /api/ {
+        proxy_pass http://10.90.4.20/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+
+    # Arahkan trafik web utama ke cluster web frontend (maki & panda)
+    location / {
+        proxy_pass http://web_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOT
+
+
+ln -sf /etc/nginx/sites-available/gojo-proxy /etc/nginx/sites-enabled/gojo-proxy
+rm -f /etc/nginx/sites-enabled/default
+
+
+nginx -t && service nginx restart
+EOF
+
+
+bash /root/gojo-proxy.sh
+  
+
+
+
+Cara Verifikasi / Pembuktian Soal 16
+jalankan di itadori
+1. Uji Akses Web Frontend lewat gojo (10.90.1.4):
+curl -i http://10.90.1.4/
+
+
+  
+
+2. Uji Akses API lewat gojo (yang diteruskan ke geto lalu ke nanami/todo):
+curl -i http://10.90.1.4/api/
+  
+
+17. 
+jalankan dinanami, todo, kirara
+cat > /root/api-realip.sh << 'EOF'
+#!/bin/bash
+cat > /var/www/api/index.php << 'EOT'
+<?php
+header('Content-Type: application/json');
+$worker = gethostname();
+
+
+// Hanya percaya X-Real-IP yang dipasang geto dari proxy terpercaya
+$client_ip = $_SERVER['HTTP_X_REAL_IP'] ?? $_SERVER['REMOTE_ADDR'];
+if (!filter_var($client_ip, FILTER_VALIDATE_IP)) {
+    $client_ip = $_SERVER['REMOTE_ADDR'];
+}
+
+
+$db_status = "disconnected";
+$mysqli = @new mysqli("10.90.4.51", "jujutsu", "password123", "db_shibuya_K53");
+if (!$mysqli->connect_error) {
+    $stmt = $mysqli->prepare("INSERT INTO request_logs (worker_name, client_ip) VALUES (?, ?)");
+    if ($stmt) {
+        $stmt->bind_param("ss", $worker, $client_ip);
+        $stmt->execute();
+        $stmt->close();
+        $db_status = "logged_to_yaga";
+    }
+    $mysqli->close();
+} else {
+    $db_status = "error: " . $mysqli->connect_error;
+}
+
+
+echo json_encode([
+    "status" => "success",
+    "worker" => $worker,
+    "client_ip" => $client_ip,
+    "db_log" => $db_status
+]) . "\n";
+EOT
+
+
+service php8.4-fpm restart
+EOF
+
+
+bash /root/api-realip.sh
+
+
+
+
+
+
+
+
+jalankan digeto
+cat > /root/geto-lb.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+echo "nameserver 192.168.122.1" > /etc/resolv.conf
+apt-get update; apt-get install -y nginx curl
+
+
+cat > /etc/nginx/sites-available/load-balancer << 'EOT'
+upstream api_cluster {
+    server 10.90.4.41 weight=3 max_fails=2 fail_timeout=5s;
+    server 10.90.4.42 weight=1 max_fails=2 fail_timeout=5s;
+    server 10.90.4.43 backup;
+}
+
+
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    # Hanya gojo (10.90.1.4) yang dipercaya untuk memberi IP client asli
+    set_real_ip_from 10.90.1.4;
+    real_ip_header X-Real-IP;
+
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 3;
+        proxy_connect_timeout 2s;
+
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOT
+
+
+ln -sf /etc/nginx/sites-available/load-balancer /etc/nginx/sites-enabled/load-balancer
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && service nginx restart
+EOF
+
+
+bash /root/geto-lb.sh
+
+
+
+
+
+
+
+
+
+
+
+
+Langkah 3: Verifikasi Pengujian dari Klien (itadori & kusakabe)
+1. Uji dari Network 2 (itadori):
+2. Bash
+curl -s http://jujutsu.K53.com/api/
+3. 4. Harus mencatat client_ip sesuai IP itadori (contoh: 10.90.2.10).
+5. Uji dari Network 3 (kusakabe atau miwa): (Jika belum mendapat IP, jalankan udhcpc -i eth0 terlebih dahulu)
+6. Bash
+udhcpc -i eth0
+curl -s http://jujutsu.K53.com/api/
+7. 8. Harus mencatat client_ip sesuai IP Divisi B (contoh: 10.90.3.10 atau 10.90.3.99).
+9. Uji Spoofing (Keamanan Header): Kirim header palsu secara sengaja dari itadori untuk membuktikan bahwa geto menolaknya dan tetap meneruskan IP asli yang benar:
+10. Bash
+curl -s -H "X-Forwarded-For: 1.2.3.4" -H "X-Real-IP: 9.9.9.9" http://jujutsu.K53.com/api/
+11. 12. Hasil client_ip di JSON harus tetap IP asli itadori, bukan 1.2.3.4 atau 9.9.9.9.
+13. Cek di Database (yaga & inumaki): Buka konsol yaga atau inumaki, lalu jalankan query:
+14. Bash
+mysql -u root -D db_shibuya_K53 -e "SELECT * FROM request_logs ORDER BY id DESC LIMIT 5;"
+15. 16. Pastikan kolom client_ip berisi IP klien yang valid (seperti 10.90.2.x atau 10.90.3.x), dan bukan IP proxy (10.90.1.4 atau 10.90.4.20).
+
+
+
+
+  
+  
+
+  
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+18.
+jalanin digeto
+cat > /etc/nginx/sites-available/load-balancer << 'EOT'
+upstream api_cluster {
+    server 10.90.4.41 weight=3;
+    server 10.90.4.42 weight=1;
+    server 10.90.4.43 backup;
+}
+
+
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    location / {
+        proxy_pass http://api_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOT
+
+
+nginx -t && service nginx restart
+  
+
+
+
+2. Skenario Uji Failover (Pembuktian kirara Mengambil Alih)
+1. Matikan Nginx di nanami dan todo:
+   * Di konsol nanami: service nginx stop
+   * Di konsol todo: service nginx stop
+  
+
+  
+
+
+
+jalankan di itadori
+curl -i http://jujutsu.K53.com/api/
+  
+
+Nyalakan Kembali nanami dan todo:
+* Di konsol nanami: service nginx start
+* Di konsol todo: service nginx start
+Cek Log Akhir di Database (yaga & inumaki):
+mysql -u root -D db_shibuya_K53 -e "SELECT * FROM request_logs ORDER BY id DESC LIMIT 5;"
+
+
+  
+
+
+
+jangan lupa nyalain lagi di nanami dan todo
+service nginx start 
+
+
+cek apakah diitadori sudah normal
+curl -s http://jujutsu.K53.com/api/
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+19. 
+jalankan digojo
+cat > /root/gojo-cache-ratelimit.sh << 'EOF'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+
+
+# 1. Buat direktori untuk menyimpan cache Nginx
+mkdir -p /var/cache/nginx/jujutsu_cache
+
+
+# 2. Definisikan Zone Rate Limiting (10 request per detik per IP, nama zona: api_limit, memory: 10MB)
+# Letakkan konfigurasi ini di luar blok server (di dalam blok http)
+cat > /etc/nginx/conf.d/ratelimit.conf << 'EOT'
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+EOT
+
+
+# 3. Konfigurasi Utama Proxy Cache & Rate Limiting pada Gojo
+cat > /etc/nginx/sites-available/gojo-proxy << 'EOT'
+# Definisikan parameter cache proxy
+proxy_cache_path /var/cache/nginx/jujutsu_cache levels=1:2 keys_zone=my_cache:10m max_size=10g inactive=60m use_temp_path=off;
+
+
+upstream web_cluster {
+    server 10.90.4.31;
+    server 10.90.4.32;
+}
+
+
+server {
+    listen 80;
+    server_name jujutsu.K53.com www.jujutsu.K53.com _;
+
+
+    # Arahkan trafik API ke Internal Load Balancer geto dengan Rate Limiting
+    location /api/ {
+        # Batasi 10 req/s, burst=20 agar request cepat tidak langsung error 503
+        limit_req zone=api_limit burst=20 nodelay;
+
+
+        proxy_pass http://10.90.4.20/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+
+    # Arahkan trafik web utama ke cluster web frontend dengan Proxy Caching (10 menit)
+    location / {
+        proxy_pass http://web_cluster;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+
+        # Aktifkan cache
+        proxy_cache my_cache;
+        proxy_cache_valid 200 302 10m; # Cache valid 10 menit untuk HTTP 200 dan 302
+        proxy_cache_valid 404 1m;
+        
+        # Tambahkan header X-Cache-Status
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+}
+EOT
+
+
+ln -sf /etc/nginx/sites-available/gojo-proxy /etc/nginx/sites-enabled/gojo-proxy
+rm -f /etc/nginx/sites-enabled/default
+
+
+nginx -t && service nginx restart
+EOF
+
+
+bash /root/gojo-cache-ratelimit.sh
+
+
+  
+
+
+
+jalankan diitadori
+curl -I http://10.90.1.4/
+* Akses Pertama (Cache Belum Ada): Header akan menampilkan X-Cache-Status: MISS (artinya Nginx mengambil data baru dari backend maki/panda).
+* Akses Kedua (Segera Sesudahnya): Header akan menampilkan X-Cache-Status: HIT (artinya Nginx menyajikan halaman langsung dari penyimpanan cache lokal tanpa membebani backend).
+
+
+
+
+jalankan juga diitadori
+for i in {1..25}; do curl -s -o /dev/null -w "%{http_code}\n" http://10.90.1.4/api/; done
+Hasil yang Diharapkan:
+* Beberapa request awal akan menghasilkan status 200 (sukses).
+* Begitu melebihi batas (karena burst=20 terlampaui), request berikutnya akan langsung diblokir oleh Nginx dengan menghasilkan status 503 Service Temporarily Unavailable.
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+20.
+
+
+jalankan di kusakabe
+udhcpc -i eth0
+echo "nameserver 10.90.1.2" > /etc/resolv.conf
+apk update && apk add apache2-utils curl
+
+
+- Benchmark halaman utama (dilayani dari proxy cache gojo)
+jalankan di kusakabe
+ab -n 600 -c 30 http://jujutsu.K53.com/
+
+
+- Benchmark /api/ dengan rate limiting AKTIF
+jalankan di kusakabe
+ab -n 600 -c 30 http://jujutsu.K53.com/api/
+
+
+- Benchmark /api/ baseline (rate limiting dinonaktifkan sementara)
+jalankan di gojo
+sed -i 's/limit_req zone/#limit_req zone/' /etc/nginx/sites-available/gojo-proxy
+nginx -t && service nginx reload
+
+
+jalankan di kusakabe
+ab -n 600 -c 30 http://jujutsu.K53.com/api/
+
+
+aktifkan kembali rate limiting
+jalankan di gojo
+sed -i 's/#limit_req zone/limit_req zone/' /etc/nginx/sites-available/gojo-proxy
+nginx -t && service nginx reload
+grep limit_req /etc/nginx/sites-available/gojo-proxy
+
+
+- Pembuktian ukuran body (untuk menjelaskan "Failed requests" di ab)
+jalankan di kusakabe
+for i in 1 2 3 4 5 6 7 8; do curl -s http://jujutsu.K53.com/api/ | wc -c; done
+
+
+- Analisis access log gojo
+jalankan di gojo
+awk '$1=="10.90.3.11"{print $7, $9}' /var/log/nginx/access.log | sort | uniq -c
+grep -c "limiting requests" /var/log/nginx/error.log
+tail -n 20 /var/log/nginx/access.log
+
+
+HASIL BENCHMARK (dari kusakabe, ab -n 600 -c 30)
+
+
+| Metrik                         | /  (cache) | /api/ rate limit AKTIF | /api/ baseline (TANPA limit) |
+| Waktu total                    | 0,125 s    | 0,165 s                | 1,066 s                      |
+| Requests per second            | 4786,86    | 3637,36                | 563,08                       |
+| Latensi mean (per request)     | 6,27 ms    | 8,25 ms                | 53,28 ms                     |
+| Latensi p50 / p95 / p99        | -          | 6 / 8 / 61 ms          | 58 / 78 / 83 ms              |
+| Latensi maksimum               | -          | 77 ms                  | 84 ms                        |
+| Respons 2xx                    | 600        | 22                     | 600                          |
+| Respons ditolak (Non-2xx, 503) | 0          | 578                    | 0                            |
+| Failed requests (ab)           | 0          | 583 (semua Length)     | 149 (semua Length)           |
+| Connect / Receive / Exception  | 0 / 0 / 0  | 0 / 0 / 0              | 0 / 0 / 0                    |
+
+
+ANALISIS
+
+
+1. Halaman utama (/)
+   RPS 4786,86 dan 0 request gagal. Performanya sangat tinggi karena gojo
+   menyajikan halaman dari proxy cache (status HIT) sehingga server backend
+   maki/panda tidak terbebani.
+
+
+2. Baseline vs rate limiting aktif pada /api/
+   - Baseline (tanpa limit) mencapai 563,08 req/s dengan latensi mean
+     53,28 ms. Semua 600 request sukses karena setiap request benar-benar
+     diteruskan gojo -> geto -> worker API -> dicatat ke database yaga.
+     Angka ini adalah kapasitas /api/ yang sebenarnya.
+   - Saat rate limit aktif, RPS naik menjadi 3637,36 req/s dan latensi turun
+     menjadi 8,25 ms. Ini BUKAN peningkatan kapasitas: gojo langsung membalas
+     503 untuk request yang melebihi kuota tanpa meneruskannya ke backend.
+   - Hanya 22 request yang lolos (burst 20 + 1 request awal + sisa token
+     selama uji berlangsung), sedangkan 578 request ditolak dengan 503.
+   - Rate limiting terbukti melindungi backend dari lonjakan request.
+
+
+3. Catatan tentang "Failed requests"
+   Semua failed pada ab bertipe Length, bukan kegagalan sungguhan
+   (Connect = 0, Receive = 0, Exceptions = 0).
+   - Pada baseline, ab membandingkan panjang body dengan respons pertama
+     (90 byte, dari nanami). Respons todo lebih pendek (88 byte) karena nama
+     worker-nya lebih pendek. Hasil loop curl | wc -c menunjukkan urutan
+     90 90 88 90 90 90 88 90, yaitu 6 kali 90 (nanami) dan 2 kali 88 (todo),
+     sesuai bobot load balancer 3:1. Karena itu 149 dari 600 request (~25%)
+     dihitung "failed length".
+   - Pada uji rate limit, body 503 (190 byte) berbeda dari body JSON (90 byte).
+   - Jumlah request yang benar-benar ditolak mengikuti angka Non-2xx
+     responses (578), bukan angka Failed.
+
+
+ANALISIS ACCESS LOG GOJO (dari kusakabe 10.90.3.11)
+
+
+| Path  | Status | Jumlah | Keterangan                                  |
+| /     | 200    | 600    | Halaman utama, dilayani dari cache          |
+| /api/ | 200    | 622    | 22 (uji dengan limit) + 600 (baseline)      |
+| /api/ | 503    | 578    | Ditolak rate limit                          |
+
+
+grep -c "limiting requests" pada error.log juga bernilai 578, sama dengan
+jumlah 503 di access log dan Non-2xx pada ab.
+
+
+Pembedaan jenis kegagalan:
+
+
+| Jenis kegagalan                           | Jumlah | Bukti                                                   |
+| Kegagalan aplikasi (502/504 dari upstream)| 0      | Tidak ada status 502/504 di access log                  |
+| Kegagalan koneksi                         | 0      | ab: Connect = 0, Receive = 0, Exceptions = 0            |
+| Ditolak kebijakan rate limit              | 578    | 503 di access log + 578 entri "limiting requests"       |
+
+
+KESIMPULAN
+
+
+- Layanan web utama (/) stabil dan sangat cepat berkat proxy cache:
+  4786,86 req/s tanpa request gagal.
+- Kapasitas /api/ tanpa pembatasan sekitar 563 req/s, latensi mean 53,28 ms,
+  dan semua 600 request sukses.
+- Rate limiting 10 r/s (burst 20) di gojo bekerja: dari 600 request beruntun
+  hanya 22 diteruskan dan 578 ditolak dengan 503, sehingga backend terlindungi.
+- Tidak ada kegagalan aplikasi maupun kegagalan koneksi. Seluruh respons
+  non-2xx berasal dari kebijakan rate limit.
